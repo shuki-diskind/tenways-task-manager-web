@@ -1,0 +1,44 @@
+// Minimal service worker: network-first with cache fallback for the app
+// shell only. Supabase API/auth/realtime/attachment requests are left
+// completely alone (their URLs are outside this worker's scope path).
+var CACHE = 'tenways-tasks-v1';
+var BASE = self.registration.scope; // .../webapp/ - only app files live here
+var SHELL = [
+  'index.html', 'styles.css', 'config.js', 'manifest.webmanifest',
+  'js/client.js', 'js/app.js', 'js/auth.js', 'vendor/supabase.js',
+  'icons/icon-192.png', 'icons/icon-512.png',
+];
+
+self.addEventListener('install', function (e) {
+  e.waitUntil(
+    caches.open(CACHE)
+      .then(function (c) { return c.addAll(SHELL); })
+      .then(function () { return self.skipWaiting(); })
+  );
+});
+
+self.addEventListener('activate', function (e) {
+  e.waitUntil(
+    caches.keys().then(function (keys) {
+      return Promise.all(keys.filter(function (k) { return k !== CACHE; })
+        .map(function (k) { return caches.delete(k); }));
+    }).then(function () { return self.clients.claim(); })
+  );
+});
+
+self.addEventListener('fetch', function (e) {
+  // Only handle GETs for the app's own files; everything else (Supabase
+  // data, auth, realtime, attachments) goes straight to the network.
+  if (e.request.method !== 'GET' || e.request.url.indexOf(BASE) !== 0) return;
+  e.respondWith(
+    fetch(e.request).then(function (resp) {
+      var copy = resp.clone();
+      caches.open(CACHE).then(function (c) { c.put(e.request, copy); });
+      return resp;
+    }).catch(function () {
+      return caches.match(e.request).then(function (m) {
+        return m || caches.match(BASE + 'index.html');
+      });
+    })
+  );
+});
