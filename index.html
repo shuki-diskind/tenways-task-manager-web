@@ -62,9 +62,13 @@
         <div id="auth-info" class="form-info hidden"></div>
         <button type="submit" class="btn primary wide" id="auth-submit">Sign in</button>
       </form>
-      <p class="small toggle-line">
+      <!-- Self sign-up is switched off in Supabase: admins create accounts in
+           the Admin area, so this toggle stays hidden. Re-show it if you ever
+           turn "Allow new users to sign up" back on. -->
+      <p class="small toggle-line hidden">
         <a href="#" id="auth-toggle">New here? Create an account</a>
       </p>
+      <p class="small muted toggle-line">Need an account? Ask a TENWAYS admin to add you.</p>
     </div>
   </div>
 
@@ -86,7 +90,7 @@
     <main>
       <div class="toolbar">
         <button class="btn primary" id="btn-new">&#65291; New record</button>
-        <input type="search" id="search-box" placeholder="Search title and notes&hellip;" />
+        <input type="search" id="search-box" placeholder="Search title, description and notes&hellip;" />
         <select id="filter-status" title="Filter by status">
           <option value="">All statuses</option>
           <option value="open">Open</option>
