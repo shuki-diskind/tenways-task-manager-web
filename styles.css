@@ -113,6 +113,15 @@ input, textarea, select {
   font: inherit;
 }
 textarea { resize: vertical; }
+
+/* Description + Notes size themselves to their content (see autoGrow in
+   app.js), so they never clip text behind an inner scrollbar. */
+#rec-description, #rec-notes {
+  resize: none;
+  overflow-y: hidden;
+  min-height: 78px;
+  line-height: 1.45;
+}
 input:focus, textarea:focus, select:focus {
   outline: 2px solid var(--accent);
   outline-offset: -1px;
@@ -533,6 +542,9 @@ tbody tr:hover td { background: var(--row-hover); }
   html, body { font-size: 15px; }
   /* 16px inputs stop iOS Safari from zooming in on focus */
   input, textarea, select { font-size: 16px; }
+  /* roomier starting size on phones; they grow from here as you type */
+  #rec-description { min-height: 132px; }
+  #rec-notes { min-height: 110px; }
   .btn { padding: 10px 16px; }
   .icon-btn { font-size: 17px; padding: 8px 10px; }
 
@@ -610,6 +622,7 @@ tbody tr:hover td { background: var(--row-hover); }
     padding-top: calc(16px + env(safe-area-inset-top));
   }
   .admin-panel { width: 100%; }
+  .modal { -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
   .field-row { flex-wrap: wrap; }
   .field-row .field { flex: 1 1 45%; min-width: 45%; }
   .field-narrow { max-width: none; }

@@ -735,7 +735,22 @@
     if (mode === 'edit') loadAttachments();
     $('btn-save').textContent = 'Save';
     $('modal-backdrop').classList.remove('hidden');
+    autoGrowAll(); // must run while visible, or scrollHeight reads 0
     $('rec-title').focus();
+  }
+
+  // Description and Notes grow with their content instead of scrolling
+  // inside a fixed box. On a phone the modal is full-screen and scrolls, so
+  // long text stays readable rather than trapped behind a tiny inner bar.
+  function autoGrow(el) {
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = el.scrollHeight + 'px';
+  }
+
+  function autoGrowAll() {
+    autoGrow($('rec-description'));
+    autoGrow($('rec-notes'));
   }
 
   function closeModal() {
@@ -1372,6 +1387,9 @@
     });
     $('cat-new-name').addEventListener('keydown', function (e) {
       if (e.key === 'Enter') { e.preventDefault(); saveNewCategory(); }
+    });
+    ['rec-description', 'rec-notes'].forEach(function (id) {
+      $(id).addEventListener('input', function () { autoGrow($(id)); });
     });
     $('search-box').addEventListener('input', render);
     $('filter-status').addEventListener('change', render);
