@@ -18,6 +18,12 @@
     'creator:profiles!todos_created_by_fkey(display_name,email)',
   ].join(',');
 
+  var SHEET_ROW_SELECT = [
+    'id', 'tab_id', 'position', 'data', 'version', 'created_at', 'updated_at',
+    'created_by', 'updated_by',
+    'editor:profiles!sheet_rows_updated_by_fkey(display_name,email)',
+  ].join(',');
+
   var STATUS_LABELS = { open: 'Open', in_progress: 'In progress', done: 'Done' };
   var PRIORITY_LABELS = { low: 'Low', normal: 'Normal', high: 'High' };
 
@@ -28,6 +34,10 @@
     profiles: [],
     categories: [],
     perms: [],          // category_permissions rows (own rows; all rows for admins)
+    tabs: [],           // every tab this user may see
+    currentTabId: null, // which tab is on screen
+    sheetCols: [],      // column definitions of the current sheet tab
+    sheetRows: [],      // rows of the current sheet tab
     channel: null,
     modal: null,        // { mode, id, version, current, sel: {assigned,visible,cats} }
     reloadTimer: null,
@@ -113,8 +123,9 @@
 
   // ---------- data access ----------
 
-  function fetchTodos() {
+  function fetchTodos(tabId) {
     return sb.from('todos').select(TODO_SELECT)
+      .eq('tab_id', tabId)
       .order('created_at', { ascending: false })
       .then(function (res) {
         if (res.error) throw res.error;
@@ -131,8 +142,9 @@
       });
   }
 
-  function fetchCategories() {
+  function fetchCategories(tabId) {
     return sb.from('categories').select('id, name')
+      .eq('tab_id', tabId)
       .order('name')
       .then(function (res) {
         if (res.error) throw res.error;
@@ -149,6 +161,33 @@
       });
   }
 
+  function fetchTabs() {
+    return sb.from('tabs').select('id, name, kind, position, visible_to, version')
+      .order('position')
+      .then(function (res) {
+        if (res.error) throw res.error;
+        return res.data;
+      });
+  }
+
+  function fetchSheetColumns(tabId) {
+    return sb.from('sheet_columns').select('id, tab_id, key, name, kind, options, position')
+      .eq('tab_id', tabId).order('position')
+      .then(function (res) {
+        if (res.error) throw res.error;
+        return res.data;
+      });
+  }
+
+  function fetchSheetRows(tabId) {
+    return sb.from('sheet_rows').select(SHEET_ROW_SELECT)
+      .eq('tab_id', tabId).order('position')
+      .then(function (res) {
+        if (res.error) throw res.error;
+        return res.data;
+      });
+  }
+
   function fetchOne(id) {
     return sb.from('todos').select(TODO_SELECT).eq('id', id).maybeSingle()
       .then(function (res) {
@@ -159,12 +198,30 @@
 
   async function reload(showErrors) {
     try {
-      var results = await Promise.all([fetchTodos(), fetchProfiles(), fetchCategories(), fetchPerms()]);
-      state.todos = results[0];
-      state.profiles = results[1];
-      state.categories = results[2];
-      state.perms = results[3];
+      var base = await Promise.all([fetchTabs(), fetchProfiles(), fetchPerms()]);
+      state.tabs = base[0];
+      state.profiles = base[1];
+      state.perms = base[2];
       state.myProfile = state.profiles.find(function (p) { return p.id === state.user.id; }) || null;
+      ensureCurrentTab();
+
+      var tab = currentTab();
+      if (tab && tab.kind === 'sheet') {
+        var s = await Promise.all([fetchSheetColumns(tab.id), fetchSheetRows(tab.id)]);
+        state.sheetCols = s[0];
+        state.sheetRows = s[1];
+        state.todos = [];
+        state.categories = [];
+      } else {
+        var t = tab
+          ? await Promise.all([fetchTodos(tab.id), fetchCategories(tab.id)])
+          : [[], []];
+        state.todos = t[0];
+        state.categories = t[1];
+        state.sheetCols = [];
+        state.sheetRows = [];
+      }
+      renderTabStrip();
       updateAdminUi();
       renderCategoryFilter();
       renderAssignedFilter();
@@ -241,6 +298,12 @@
   }
 
   function render() {
+    var tab = currentTab();
+    var isSheet = !!(tab && tab.kind === 'sheet');
+    $('tasks-view').classList.toggle('hidden', isSheet);
+    $('sheet-view').classList.toggle('hidden', !isSheet);
+    if (isSheet) { renderSheet(); return; }
+
     var rows = state.todos.filter(matchesFilters);
     var tbody = $('todo-tbody');
     tbody.replaceChildren.apply(tbody, rows.map(renderRow));
@@ -486,7 +549,9 @@
     var btn = $('btn-cat-add');
     btn.disabled = true;
     try {
-      var res = await sb.from('categories').insert({ name: name }).select('id, name').single();
+      var res = await sb.from('categories')
+        .insert({ name: name, tab_id: state.currentTabId })
+        .select('id, name').single();
       if (res.error) throw res.error;
       state.categories.push(res.data);
       state.categories.sort(function (a, b) { return a.name.localeCompare(b.name); });
@@ -543,6 +608,12 @@
       summary: function (set) { return summarizePeople(set, 'Everyone'); },
       empty: 'No team members found.',
     },
+    tabvis: {
+      items: function () { return state.profiles.map(function (p) { return { id: p.id, label: p.display_name }; }); },
+      summary: function (set) { return summarizePeople(set, 'Everyone'); },
+      empty: 'No team members found.',
+      everyoneRow: 'Everyone (whole team)',
+    },
     cats: {
       // Non-admins can only tag records with categories they hold
       // "can create" permission for (the database enforces it too).
@@ -572,10 +643,15 @@
     return names.length <= 2 ? names.join(', ') : names.length + ' people';
   }
 
+  function mselSet(key) {
+    if (key === 'tabvis') return tabModal.sel;
+    return state.modal ? state.modal.sel[key] : new Set();
+  }
+
   function buildMselPanel(key) {
     var cfg = MSELS[key];
     var panel = $('msel-panel-' + key);
-    var selected = state.modal.sel[key];
+    var selected = mselSet(key);
     panel.replaceChildren();
     var items = cfg.items();
     if (items.length === 0) {
@@ -614,7 +690,7 @@
   }
 
   function updateMselSummary(key) {
-    $('msel-btn-' + key).textContent = MSELS[key].summary(state.modal.sel[key]);
+    $('msel-btn-' + key).textContent = MSELS[key].summary(mselSet(key));
   }
 
   function closeAllPanels() {
@@ -724,7 +800,7 @@
     $('rec-priority').value = t ? t.priority : 'normal';
     $('rec-due').value = (t && t.due_date) ? t.due_date : '';
     closeAllPanels();
-    Object.keys(MSELS).forEach(updateMselSummary);
+    ['assigned', 'visible', 'cats'].forEach(updateMselSummary);
     setModalError(null);
     hideConflict();
     updateModalMeta(t || null);
@@ -1217,6 +1293,7 @@
     setModalError(null);
     try {
       if (m.mode === 'create') {
+        fields.tab_id = state.currentTabId;
         var ins = await sb.from('todos').insert(fields).select(TODO_SELECT).single();
         if (ins.error) throw ins.error;
         upsertLocal(ins.data);
@@ -1273,6 +1350,14 @@
         console.log('[app] realtime categories: ' + payload.eventType);
         scheduleReload();
       })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tabs' }, function (payload) {
+        console.log('[app] realtime tabs: ' + payload.eventType);
+        scheduleReload();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'sheet_rows' }, function (payload) {
+        console.log('[app] realtime sheet rows: ' + payload.eventType);
+        scheduleReload();
+      })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'category_permissions' }, function (payload) {
         console.log('[app] realtime permissions: ' + payload.eventType);
         scheduleReload();
@@ -1325,7 +1410,13 @@
     state.profiles = [];
     state.categories = [];
     state.perms = [];
+    state.tabs = [];
+    state.sheetCols = [];
+    state.sheetRows = [];
+    state.currentTabId = null;
     closeModal();
+    closeRowModal();
+    closeTabModal();
     closeCatModal();
     closeAdminModal();
     $('btn-categories').classList.add('hidden');
@@ -1340,6 +1431,357 @@
     var v = meta && meta.getAttribute('content');
     if (v && v !== '0.0.0') $('app-version').textContent = 'v' + v;
   })();
+
+  // ---------- tabs ----------
+
+  function currentTab() {
+    return state.tabs.find(function (t) { return t.id === state.currentTabId; }) || null;
+  }
+
+  function ensureCurrentTab() {
+    if (currentTab()) return;
+    var remembered = null;
+    try { remembered = window.localStorage.getItem('tenways.tab'); } catch (e) { /* private mode */ }
+    var pick = state.tabs.find(function (t) { return t.id === remembered; }) || state.tabs[0] || null;
+    state.currentTabId = pick ? pick.id : null;
+  }
+
+  function switchTab(id) {
+    if (id === state.currentTabId) return;
+    state.currentTabId = id;
+    try { window.localStorage.setItem('tenways.tab', id); } catch (e) { /* private mode */ }
+    $('search-box').value = '';
+    $('sheet-search').value = '';
+    $('filter-status').value = '';
+    reload(true);
+  }
+
+  function renderTabStrip() {
+    var strip = $('tab-strip');
+    strip.replaceChildren.apply(strip, state.tabs.map(function (t) {
+      var b = el('button', 'tab-btn' + (t.id === state.currentTabId ? ' active' : ''), t.name);
+      b.type = 'button';
+      if ((t.visible_to || []).length > 0) {
+        var lock = el('span', 'tab-lock', '\u{1F512}');
+        lock.title = 'Only visible to: ' + t.visible_to.map(profileName).join(', ') + ' (and admins)';
+        b.appendChild(lock);
+      }
+      b.addEventListener('click', function () { switchTab(t.id); });
+      return b;
+    }));
+    $('btn-new-tab').classList.toggle('hidden', !isAdmin());
+    $('btn-tab-settings').classList.toggle('hidden', !isAdmin() || !currentTab());
+  }
+
+  // ---------- tab settings (admins) ----------
+
+  var tabModal = { open: false, mode: 'edit', sel: new Set() };
+
+  function openTabModal(mode) {
+    var t = currentTab();
+    if (mode === 'edit' && !t) return;
+    tabModal.open = true;
+    tabModal.mode = mode;
+    tabModal.sel = new Set(mode === 'edit' ? (t.visible_to || []) : []);
+    $('tab-modal-title').textContent = mode === 'create' ? 'New tab' : 'Tab settings';
+    $('tab-name').value = mode === 'edit' ? t.name : '';
+    $('tab-kind-row').classList.toggle('hidden', mode !== 'create');
+    $('tab-kind').value = 'tasks';
+    $('btn-tab-delete').classList.toggle('hidden', mode !== 'edit');
+    setTabError(null);
+    updateMselSummary('tabvis');
+    closeAllPanels();
+    $('tab-backdrop').classList.remove('hidden');
+    $('tab-name').focus();
+  }
+
+  function closeTabModal() {
+    tabModal.open = false;
+    closeAllPanels();
+    $('tab-backdrop').classList.add('hidden');
+  }
+
+  function setTabError(msg) {
+    var e = $('tab-error');
+    e.textContent = msg || '';
+    e.classList.toggle('hidden', !msg);
+  }
+
+  async function saveTab() {
+    var name = $('tab-name').value.trim();
+    if (!name) { setTabError('Give the tab a name.'); return; }
+    var btn = $('btn-tab-save');
+    btn.disabled = true;
+    setTabError(null);
+    try {
+      if (tabModal.mode === 'create') {
+        var maxPos = state.tabs.reduce(function (m, t) { return Math.max(m, t.position || 0); }, -1);
+        var ins = await sb.from('tabs').insert({
+          name: name,
+          kind: $('tab-kind').value,
+          position: maxPos + 1,
+          visible_to: Array.from(tabModal.sel),
+        }).select('*').single();
+        if (ins.error) throw ins.error;
+        state.currentTabId = ins.data.id;
+        try { window.localStorage.setItem('tenways.tab', ins.data.id); } catch (e) { /* ignore */ }
+        toast('Tab "' + ins.data.name + '" created', 'ok');
+      } else {
+        var t = currentTab();
+        var upd = await sb.from('tabs')
+          .update({ name: name, visible_to: Array.from(tabModal.sel) })
+          .eq('id', t.id).eq('version', t.version).select('*');
+        if (upd.error) throw upd.error;
+        if (!upd.data || upd.data.length === 0) {
+          setTabError('This tab was changed by someone else - reopen the settings and try again.');
+          btn.disabled = false;
+          await reload(false);
+          return;
+        }
+        toast('Tab updated', 'ok');
+      }
+      closeTabModal();
+      await reload(true);
+    } catch (err) {
+      setTabError(err.message || 'Could not save the tab.');
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function deleteTab() {
+    var t = currentTab();
+    if (!t) return;
+    var what = t.kind === 'sheet' ? 'all of its rows and columns' : 'all of its records and categories';
+    if (!window.confirm('Delete the tab "' + t.name + '"?\n\nThis permanently deletes ' + what +
+      ' for the whole team. This cannot be undone.')) return;
+    try {
+      var res = await sb.from('tabs').delete().eq('id', t.id).select('id');
+      if (res.error) throw res.error;
+      state.currentTabId = null;
+      try { window.localStorage.removeItem('tenways.tab'); } catch (e) { /* ignore */ }
+      closeTabModal();
+      toast('Tab deleted', 'ok');
+      await reload(true);
+    } catch (err) {
+      setTabError(err.message || 'Could not delete the tab.');
+    }
+  }
+
+  // ---------- sheet tabs ----------
+
+  function sheetValue(row, col) {
+    var v = row.data ? row.data[col.key] : null;
+    if (v === null || v === undefined || v === '') return '';
+    if (col.kind === 'checkbox') return (v === true || v === 'true') ? 'Yes' : 'No';
+    if (col.kind === 'date') return formatDue(String(v).slice(0, 10)) || String(v);
+    return String(v);
+  }
+
+  function sheetMatches(row) {
+    var q = $('sheet-search').value.trim().toLowerCase();
+    if (!q) return true;
+    return state.sheetCols.some(function (c) {
+      return sheetValue(row, c).toLowerCase().indexOf(q) >= 0;
+    });
+  }
+
+  function renderSheet() {
+    var cols = state.sheetCols;
+    var rows = state.sheetRows.filter(sheetMatches);
+    var head = $('sheet-head');
+    var body = $('sheet-body');
+
+    $('sheet-nocols').classList.toggle('hidden', cols.length > 0);
+    $('sheet-empty').classList.toggle('hidden', !(cols.length > 0 && state.sheetRows.length === 0));
+    $('sheet-nomatch').classList.toggle('hidden', !(state.sheetRows.length > 0 && rows.length === 0));
+    $('btn-new-row').disabled = cols.length === 0;
+
+    var hr = el('tr');
+    cols.forEach(function (c) { hr.appendChild(el('th', null, c.name)); });
+    head.replaceChildren(hr);
+
+    body.replaceChildren.apply(body, rows.map(function (row) {
+      var tr = el('tr', 'sheet-row-open');
+      cols.forEach(function (c, i) {
+        var text = sheetValue(row, c);
+        var td = el('td', 'sheet-cell' + (i === 0 ? ' sheet-first' : '') + (text ? '' : ' empty-cell'),
+          text || '—');
+        td.setAttribute('data-label', c.name);
+        tr.appendChild(td);
+      });
+      tr.addEventListener('click', function () { openRowModal('edit', row); });
+      return tr;
+    }));
+
+    var total = state.sheetRows.length;
+    var label = total + (total === 1 ? ' row' : ' rows');
+    if (rows.length !== total) label += ' · showing ' + rows.length;
+    $('count-label').textContent = label;
+  }
+
+  // ---------- sheet row editor ----------
+
+  var rowModal = null; // { mode, id, version }
+
+  function rowFieldId(col) { return 'rowfield-' + col.id; }
+
+  function buildRowFields(row) {
+    var wrap = $('row-fields');
+    wrap.replaceChildren();
+    state.sheetCols.forEach(function (c) {
+      var lab = el('label', 'field');
+      lab.appendChild(el('span', null, c.name));
+      var v = (row && row.data) ? row.data[c.key] : null;
+      var input;
+      if (c.kind === 'textarea') {
+        input = document.createElement('textarea');
+        input.rows = 3;
+        input.value = v == null ? '' : String(v);
+      } else if (c.kind === 'checkbox') {
+        input = document.createElement('input');
+        input.type = 'checkbox';
+        input.checked = (v === true || v === 'true');
+        input.style.width = 'auto';
+      } else if (c.kind === 'picklist') {
+        input = document.createElement('select');
+        var blank = el('option', null, '—');
+        blank.value = '';
+        input.appendChild(blank);
+        (c.options || []).forEach(function (o) {
+          var opt = el('option', null, o);
+          opt.value = o;
+          if (String(v) === o) opt.selected = true;
+          input.appendChild(opt);
+        });
+        if (v && (c.options || []).indexOf(String(v)) < 0) {
+          var extra = el('option', null, String(v));
+          extra.value = String(v);
+          extra.selected = true;
+          input.appendChild(extra);
+        }
+      } else {
+        input = document.createElement('input');
+        input.type = c.kind === 'number' ? 'number' : (c.kind === 'date' ? 'date' : 'text');
+        input.value = v == null ? '' : (c.kind === 'date' ? String(v).slice(0, 10) : String(v));
+      }
+      input.id = rowFieldId(c);
+      lab.appendChild(input);
+      wrap.appendChild(lab);
+    });
+  }
+
+  function collectRowData() {
+    var data = {};
+    state.sheetCols.forEach(function (c) {
+      var input = $(rowFieldId(c));
+      if (!input) return;
+      if (c.kind === 'checkbox') { data[c.key] = !!input.checked; return; }
+      var val = input.value;
+      if (val === '') { data[c.key] = null; return; }
+      data[c.key] = c.kind === 'number' ? Number(val) : val;
+    });
+    return data;
+  }
+
+  function setRowError(msg) {
+    var e = $('row-error');
+    e.textContent = msg || '';
+    e.classList.toggle('hidden', !msg);
+  }
+
+  function openRowModal(mode, row) {
+    rowModal = { mode: mode, id: row ? row.id : null, version: row ? row.version : null };
+    $('row-modal-title').textContent = mode === 'create' ? 'New row' : 'Edit row';
+    $('row-conflict').classList.add('hidden');
+    setRowError(null);
+    $('btn-row-delete').classList.toggle('hidden', mode !== 'edit');
+    $('row-meta').textContent = row
+      ? 'Last edited by ' + personName(row.editor) + ' ' + relTime(row.updated_at) +
+        ' · version ' + row.version
+      : '';
+    buildRowFields(row);
+    $('row-backdrop').classList.remove('hidden');
+  }
+
+  function closeRowModal() {
+    rowModal = null;
+    $('row-backdrop').classList.add('hidden');
+  }
+
+  async function saveRow(e) {
+    e.preventDefault();
+    if (!rowModal) return;
+    var btn = $('btn-row-save');
+    btn.disabled = true;
+    setRowError(null);
+    try {
+      var data = collectRowData();
+      if (rowModal.mode === 'create') {
+        var maxPos = state.sheetRows.reduce(function (m, r) { return Math.max(m, r.position || 0); }, -1);
+        var ins = await sb.from('sheet_rows')
+          .insert({ tab_id: state.currentTabId, position: maxPos + 1, data: data })
+          .select(SHEET_ROW_SELECT).single();
+        if (ins.error) throw ins.error;
+        state.sheetRows.push(ins.data);
+        closeRowModal();
+        renderSheet();
+        toast('Row added', 'ok');
+        return;
+      }
+      var upd = await sb.from('sheet_rows').update({ data: data })
+        .eq('id', rowModal.id).eq('version', rowModal.version)
+        .select(SHEET_ROW_SELECT);
+      if (upd.error) throw upd.error;
+      if (upd.data && upd.data.length > 0) {
+        var i = state.sheetRows.findIndex(function (r) { return r.id === rowModal.id; });
+        if (i >= 0) state.sheetRows[i] = upd.data[0];
+        closeRowModal();
+        renderSheet();
+        toast('Saved', 'ok');
+        return;
+      }
+      // 0 rows updated: someone saved first, or the row is gone
+      var cur = await sb.from('sheet_rows').select(SHEET_ROW_SELECT)
+        .eq('id', rowModal.id).maybeSingle();
+      if (cur.error) throw cur.error;
+      if (!cur.data) {
+        state.sheetRows = state.sheetRows.filter(function (r) { return r.id !== rowModal.id; });
+        closeRowModal();
+        renderSheet();
+        toast('That row was deleted by someone else.', 'warn', 6000);
+        return;
+      }
+      var j = state.sheetRows.findIndex(function (r) { return r.id === cur.data.id; });
+      if (j >= 0) state.sheetRows[j] = cur.data;
+      rowModal.version = cur.data.version;
+      var c = $('row-conflict');
+      c.textContent = '⚠ This row was changed by ' + personName(cur.data.editor) + ' (' +
+        relTime(cur.data.updated_at) + ') while you were editing. Your edits have NOT been saved. ' +
+        'Press Save again to replace their version with yours.';
+      c.classList.remove('hidden');
+      renderSheet();
+    } catch (err) {
+      setRowError('Could not save: ' + err.message);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function deleteRow() {
+    if (!rowModal || rowModal.mode !== 'edit') return;
+    if (!window.confirm('Delete this row? This removes it for everyone who can see this tab.')) return;
+    try {
+      var res = await sb.from('sheet_rows').delete().eq('id', rowModal.id).select('id');
+      if (res.error) throw res.error;
+      state.sheetRows = state.sheetRows.filter(function (r) { return r.id !== rowModal.id; });
+      closeRowModal();
+      renderSheet();
+      toast('Row deleted', 'ok');
+    } catch (err) {
+      setRowError('Could not delete: ' + err.message);
+    }
+  }
 
   window.todoApp = { start: start, stop: stop };
 
@@ -1358,6 +1800,8 @@
         if (closeAllPanels()) return;              // first Escape closes an open dropdown
         if (catModal.open) { closeCatModal(); return; }
         if (adminModal.open) { closeAdminModal(); return; }
+        if (tabModal.open) { closeTabModal(); return; }
+        if (rowModal) { closeRowModal(); return; }
         if (state.modal) closeModal();             // next one closes the modal
       }
     });
@@ -1418,6 +1862,25 @@
         $('btn-save').click();
       }
     });
+    $('btn-new-tab').addEventListener('click', function () { openTabModal('create'); });
+    $('btn-tab-settings').addEventListener('click', function () { openTabModal('edit'); });
+    $('btn-tab-save').addEventListener('click', saveTab);
+    $('btn-tab-delete').addEventListener('click', deleteTab);
+    $('btn-tab-cancel').addEventListener('click', closeTabModal);
+    $('tab-backdrop').addEventListener('mousedown', function (e) {
+      if (e.target === e.currentTarget) closeTabModal();
+    });
+    $('msel-btn-tabvis').addEventListener('click', function () { toggleMselPanel('tabvis'); });
+
+    $('btn-new-row').addEventListener('click', function () { openRowModal('create', null); });
+    $('row-form').addEventListener('submit', saveRow);
+    $('btn-row-cancel').addEventListener('click', closeRowModal);
+    $('btn-row-delete').addEventListener('click', deleteRow);
+    $('row-backdrop').addEventListener('mousedown', function (e) {
+      if (e.target === e.currentTarget) closeRowModal();
+    });
+    $('sheet-search').addEventListener('input', renderSheet);
+
     $('search-box').addEventListener('input', render);
     $('filter-status').addEventListener('change', render);
     $('filter-category').addEventListener('change', render);

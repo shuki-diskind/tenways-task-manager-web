@@ -642,3 +642,88 @@ tbody tr:hover td { background: var(--row-hover); }
   .statusbar { padding-bottom: calc(7px + env(safe-area-inset-bottom)); }
   .toast { bottom: calc(64px + env(safe-area-inset-bottom)); max-width: 92vw; }
 }
+
+/* ---------- tab bar ---------- */
+
+.tabbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 18px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 45px;
+  z-index: 4;
+}
+.tab-strip {
+  display: flex;
+  gap: 2px;
+  overflow-x: auto;
+  flex: 1;
+  scrollbar-width: none;
+}
+.tab-strip::-webkit-scrollbar { display: none; }
+.tab-actions { display: flex; gap: 6px; flex: 0 0 auto; }
+
+.tab-btn {
+  font: inherit;
+  font-weight: 600;
+  font-size: 13.5px;
+  white-space: nowrap;
+  padding: 10px 14px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.tab-btn:hover { color: var(--text); background: var(--row-hover); }
+.tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+.tab-btn .tab-lock { margin-left: 6px; font-size: 11px; opacity: 0.75; }
+
+.spacer { flex: 1; }
+.danger-text { color: var(--danger); }
+
+/* ---------- sheet grid ---------- */
+
+#sheet-table td { white-space: pre-wrap; word-break: break-word; }
+.sheet-cell { max-width: 320px; }
+.sheet-cell.empty-cell { color: var(--muted); }
+.sheet-row-open { cursor: pointer; }
+.sheet-check { font-size: 15px; }
+#row-fields .field:first-child { margin-top: 0; }
+
+@media (max-width: 720px) {
+  .tabbar { top: 0; position: static; padding: 0 10px; }
+  .tab-actions .btn { padding: 6px 10px; }
+
+  /* the grid becomes one card per row, like the task list */
+  #sheet-table, #sheet-table tbody { display: block; }
+  #sheet-table thead { display: none; }
+  #sheet-body tr {
+    display: block;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 10px 12px;
+    margin-bottom: 10px;
+  }
+  #sheet-body td {
+    display: flex;
+    gap: 10px;
+    padding: 3px 0;
+    border-bottom: none;
+    max-width: none;
+  }
+  #sheet-body td::before {
+    content: attr(data-label);
+    flex: 0 0 40%;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 600;
+    padding-top: 1px;
+  }
+  #sheet-body td.sheet-first { font-weight: 700; font-size: 15px; }
+  #sheet-body td.sheet-first::before { display: none; }
+}
