@@ -114,8 +114,15 @@ input, textarea, select {
 }
 textarea { resize: vertical; }
 
-/* Description + Notes size themselves to their content (see autoGrow in
-   app.js), so they never clip text behind an inner scrollbar. */
+/* Title, Description and Notes size themselves to their content (see
+   autoGrow in app.js), so they never clip text behind an inner scrollbar. */
+#rec-title, #rec-description, #rec-notes {
+  resize: none;
+  overflow-y: hidden;
+  line-height: 1.45;
+}
+/* Title starts exactly as tall as a normal one-line field, then wraps. */
+#rec-title { min-height: 38px; }
 #rec-description, #rec-notes {
   resize: none;
   overflow-y: hidden;
@@ -543,6 +550,7 @@ tbody tr:hover td { background: var(--row-hover); }
   /* 16px inputs stop iOS Safari from zooming in on focus */
   input, textarea, select { font-size: 16px; }
   /* roomier starting size on phones; they grow from here as you type */
+  #rec-title { min-height: 42px; }
   #rec-description { min-height: 132px; }
   #rec-notes { min-height: 110px; }
   .btn { padding: 10px 16px; }

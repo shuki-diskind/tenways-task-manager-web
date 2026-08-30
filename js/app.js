@@ -749,6 +749,7 @@
   }
 
   function autoGrowAll() {
+    autoGrow($('rec-title'));
     autoGrow($('rec-description'));
     autoGrow($('rec-notes'));
   }
@@ -1390,6 +1391,24 @@
     });
     ['rec-description', 'rec-notes'].forEach(function (id) {
       $(id).addEventListener('input', function () { autoGrow($(id)); });
+    });
+    // The title wraps and grows like the other fields, but stays a single
+    // line of text: flatten any line breaks that arrive by pasting.
+    $('rec-title').addEventListener('input', function () {
+      var el = $('rec-title');
+      if (el.value.indexOf('\n') >= 0 || el.value.indexOf('\r') >= 0) {
+        var pos = el.selectionStart;
+        el.value = el.value.split(/\r\n|\r|\n/).join(' ');
+        el.setSelectionRange(pos, pos);
+      }
+      autoGrow(el);
+    });
+    // Enter saves, exactly as it did when the title was a plain input.
+    $('rec-title').addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        $('btn-save').click();
+      }
     });
     $('search-box').addEventListener('input', render);
     $('filter-status').addEventListener('change', render);
