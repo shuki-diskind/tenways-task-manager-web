@@ -219,7 +219,7 @@ input:focus, textarea:focus, select:focus {
 }
 .live-dot.off { background: var(--muted); opacity: 0.6; }
 
-main { max-width: 1220px; margin: 0 auto; padding: 18px 18px 56px; }
+main { max-width: 100%; margin: 0; padding: 14px 14px 52px; }
 
 .toolbar { display: flex; gap: 10px; margin-bottom: 14px; }
 #search-box { flex: 1; max-width: 380px; }
@@ -726,6 +726,118 @@ tbody tr:hover td { background: var(--row-hover); }
   }
   #sheet-body td.sheet-first { font-weight: 700; font-size: 15px; }
   #sheet-body td.sheet-first::before { display: none; }
+  /* cards, not a grid: undo the spreadsheet sizing */
+  #sheet-table { table-layout: auto; width: 100%; font-size: 14px; }
+  #sheet-table colgroup { display: none; }
+  .sheet-gutter { display: none !important; }
+  .col-resizer { display: none; }
+  #sheet-body td {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    border-right: none;
+    height: auto;
+  }
+  #sheet-view .table-wrap { max-height: none; overflow: visible; }
 }
 
 .sheet-more { text-align: center; padding: 10px 0 4px; }
+
+/* ---------- spreadsheet-style grid ---------- */
+
+#sheet-view .table-wrap {
+  max-height: calc(100vh - 215px);
+  overflow: auto;
+  border-radius: 8px;
+}
+
+#sheet-table {
+  table-layout: fixed;          /* column widths come from <colgroup> */
+  width: max-content;
+  min-width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 12.5px;
+}
+
+#sheet-table th,
+#sheet-table td {
+  padding: 4px 8px;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;          /* one line per cell, like a spreadsheet */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+  max-width: none;
+  height: 26px;
+}
+
+#sheet-table th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  text-align: left;
+  user-select: none;
+}
+
+/* drag handle on the right edge of every header cell */
+.col-resizer {
+  position: absolute;
+  top: 0;
+  right: 0;            /* inside the cell: th clips overflow */
+  width: 8px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 4;
+}
+.col-resizer:hover { background: var(--accent); opacity: 0.35; }
+body.col-resizing { cursor: col-resize; user-select: none; }
+
+/* row-number gutter, frozen at the left edge */
+.sheet-gutter {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--panel) !important;
+  color: var(--muted);
+  text-align: right;
+  font-size: 11px;
+  border-right: 1px solid var(--line);
+}
+th.sheet-gutter { z-index: 3; }
+
+/* the sheet's own Green / Yellow / Red colour coding */
+#sheet-body tr.st-green  td { background: rgba(34, 197, 94, 0.14); }
+#sheet-body tr.st-yellow td { background: rgba(250, 204, 21, 0.18); }
+#sheet-body tr.st-red    td { background: rgba(239, 68, 68, 0.15); }
+#sheet-body tr:hover td { box-shadow: inset 0 0 0 9999px rgba(120, 130, 150, 0.06); }
+
+/* The spreadsheet rules above are desktop-only: re-assert the phone card
+   layout last so it wins on narrow screens. */
+@media (max-width: 720px) {
+  #sheet-table { table-layout: auto; width: 100%; font-size: 14px; }
+  #sheet-table colgroup { display: none; }
+  #sheet-table th { position: static; }
+  .sheet-gutter, .col-resizer { display: none !important; }
+  #sheet-body td {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    border-right: none;
+    border-bottom: none;
+    height: auto;
+    padding: 3px 0;
+  }
+  #sheet-body tr.st-green  td,
+  #sheet-body tr.st-yellow td,
+  #sheet-body tr.st-red    td { background: transparent; }
+  #sheet-body tr.st-green  { border-left: 4px solid rgba(34, 197, 94, 0.85); }
+  #sheet-body tr.st-yellow { border-left: 4px solid rgba(250, 204, 21, 0.9); }
+  #sheet-body tr.st-red    { border-left: 4px solid rgba(239, 68, 68, 0.85); }
+  #sheet-view .table-wrap { max-height: none; overflow: visible; }
+}

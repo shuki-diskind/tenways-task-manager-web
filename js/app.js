@@ -20,6 +20,34 @@
 
   var SHEET_PAGE = 200;   // rows fetched per request
 
+  // Column widths are a personal preference, so they live in this browser
+  // rather than in the shared sheet.
+  function colWidthsKey() { return 'tenways.colw.' + state.currentTabId; }
+
+  function loadColWidths() {
+    try { return JSON.parse(window.localStorage.getItem(colWidthsKey()) || '{}'); }
+    catch (e) { return {}; }
+  }
+
+  function saveColWidths() {
+    try { window.localStorage.setItem(colWidthsKey(), JSON.stringify(state.colWidths)); }
+    catch (e) { /* private mode */ }
+  }
+
+  function defaultColWidth(col) {
+    if (col.kind === 'date') return 104;
+    if (col.kind === 'number') return 72;
+    if (col.kind === 'checkbox') return 72;
+    if (col.kind === 'textarea') return 260;
+    if (col.kind === 'picklist') return 140;
+    return Math.min(260, Math.max(110, col.name.length * 9 + 30));
+  }
+
+  function colWidth(col) {
+    var w = state.colWidths[col.key];
+    return (typeof w === 'number' && w > 40) ? w : defaultColWidth(col);
+  }
+
   var SHEET_ROW_SELECT = [
     'id', 'tab_id', 'position', 'data', 'version', 'created_at', 'updated_at',
     'created_by', 'updated_by',
@@ -42,6 +70,7 @@
     sheetRows: [],      // rows of the current sheet tab (paged)
     sheetTotal: 0,      // how many rows match on the server
     sheetQuery: '',     // the search the loaded rows belong to
+    colWidths: {},      // per-tab column widths, remembered in this browser
     channel: null,
     modal: null,        // { mode, id, version, current, sel: {assigned,visible,cats} }
     reloadTimer: null,
@@ -231,6 +260,7 @@
       var tab = currentTab();
       if (tab && tab.kind === 'sheet') {
         state.sheetCols = await fetchSheetColumns(tab.id);
+        state.colWidths = loadColWidths();
         state.todos = [];
         state.categories = [];
         await loadSheetRows(true);
@@ -1614,17 +1644,50 @@
     $('sheet-nomatch').classList.toggle('hidden', !(rows.length === 0 && searching));
     $('btn-new-row').disabled = cols.length === 0;
 
+    // <colgroup> drives the widths, which is what makes dragging work
+    var table = $('sheet-table');
+    var old = table.querySelector('colgroup');
+    if (old) old.remove();
+    var cg = document.createElement('colgroup');
+    var gcol = document.createElement('col');
+    gcol.style.width = '54px';
+    cg.appendChild(gcol);
+    cols.forEach(function (c) {
+      var col = document.createElement('col');
+      col.style.width = colWidth(c) + 'px';
+      cg.appendChild(col);
+    });
+    table.insertBefore(cg, table.firstChild);
+
     var hr = el('tr');
-    cols.forEach(function (c) { hr.appendChild(el('th', null, c.name)); });
+    hr.appendChild(el('th', 'sheet-gutter', ''));
+    cols.forEach(function (c, i) {
+      var th = el('th', null, c.name);
+      th.title = c.name;
+      var handle = el('span', 'col-resizer', '');
+      handle.addEventListener('mousedown', function (ev) { startColumnResize(ev, c, i); });
+      handle.addEventListener('dblclick', function (ev) {
+        ev.preventDefault();
+        delete state.colWidths[c.key];   // double-click resets to the default
+        saveColWidths();
+        renderSheet();
+      });
+      th.appendChild(handle);
+      hr.appendChild(th);
+    });
     head.replaceChildren(hr);
 
     body.replaceChildren.apply(body, rows.map(function (row) {
-      var tr = el('tr', 'sheet-row-open');
+      var status = row.data ? String(row.data.status || '').toLowerCase() : '';
+      var tint = (status === 'green' || status === 'yellow' || status === 'red') ? ' st-' + status : '';
+      var tr = el('tr', 'sheet-row-open' + tint);
+      tr.appendChild(el('td', 'sheet-gutter', String((row.position || 0) + 1)));
       cols.forEach(function (c, i) {
         var text = sheetValue(row, c);
         var td = el('td', 'sheet-cell' + (i === 0 ? ' sheet-first' : '') + (text ? '' : ' empty-cell'),
           text || '—');
         td.setAttribute('data-label', c.name);
+        if (text) td.title = text;      // full value on hover, since cells clip
         tr.appendChild(td);
       });
       tr.addEventListener('click', function () { openRowModal('edit', row); });
@@ -1638,6 +1701,33 @@
     $('count-label').textContent = label;
     $('btn-sheet-more').classList.toggle('hidden', rows.length >= total);
     $('btn-sheet-more').textContent = 'Load more rows (' + (total - rows.length) + ' left)';
+  }
+
+  // Drag the right edge of a header cell to resize, exactly like a
+  // spreadsheet. Double-clicking the handle restores the default width.
+  function startColumnResize(ev, col, index) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    var table = $('sheet-table');
+    var colEl = table.querySelectorAll('colgroup col')[index + 1];
+    if (!colEl) return;
+    var startX = ev.clientX;
+    var startW = parseInt(colEl.style.width, 10) || colWidth(col);
+    document.body.classList.add('col-resizing');
+
+    function onMove(e) {
+      var w = Math.max(56, startW + (e.clientX - startX));
+      colEl.style.width = w + 'px';
+    }
+    function onUp() {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.classList.remove('col-resizing');
+      state.colWidths[col.key] = parseInt(colEl.style.width, 10);
+      saveColWidths();
+    }
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
   }
 
   // ---------- sheet row editor ----------
