@@ -311,6 +311,8 @@ tbody tr:hover td { background: var(--row-hover); }
 
 .empty { padding: 46px 20px; text-align: center; color: var(--muted); }
 
+.version-tag { float: right; opacity: 0.75; }
+
 .statusbar {
   position: fixed;
   bottom: 0;

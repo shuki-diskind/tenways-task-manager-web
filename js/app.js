@@ -1333,6 +1333,14 @@
     console.log('[app] stopped');
   }
 
+  // Show which build is running - makes 'is my phone on the new version?'
+  // answerable at a glance.
+  (function showVersion() {
+    var meta = document.querySelector('meta[name="app-version"]');
+    var v = meta && meta.getAttribute('content');
+    if (v && v !== '0.0.0') $('app-version').textContent = 'v' + v;
+  })();
+
   window.todoApp = { start: start, stop: stop };
 
   // ---------- static event wiring ----------
