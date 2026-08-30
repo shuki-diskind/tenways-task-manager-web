@@ -71,6 +71,8 @@
     sheetTotal: 0,      // how many rows match on the server
     sheetQuery: '',     // the search the loaded rows belong to
     colWidths: {},      // per-tab column widths, remembered in this browser
+    fullSheet: false,   // desktop: every row of the sheet is in memory
+    renderToken: 0,     // cancels a chunked render superseded by a newer one
     channel: null,
     modal: null,        // { mode, id, version, current, sel: {assigned,visible,cats} }
     reloadTimer: null,
@@ -115,6 +117,15 @@
   function isAdmin() {
     return !!(state.myProfile && state.myProfile.role === 'admin');
   }
+
+  // Whether the signed-in user may add/change/delete on the current tab.
+  function canEditCurrentTab() {
+    if (isAdmin()) return true;
+    var t = currentTab();
+    return !!(t && (t.editable_by || []).indexOf(state.user.id) >= 0);
+  }
+
+  function isPhone() { return window.matchMedia('(max-width: 720px)').matches; }
 
   function relTime(iso) {
     var secs = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
@@ -195,7 +206,7 @@
   }
 
   function fetchTabs() {
-    return sb.from('tabs').select('id, name, kind, position, visible_to, version')
+    return sb.from('tabs').select('id, name, kind, position, visible_to, editable_by, version')
       .order('position')
       .then(function (res) {
         if (res.error) throw res.error;
@@ -214,30 +225,58 @@
 
   // Sheets are read through RPCs so the database does the searching and
   // paging; they run as the caller, so tab visibility still applies.
+  // Phones page 200 rows at a time behind a "Load more" button; desktop pulls
+  // the whole sheet up front (1000 rows per request) so scrolling and search
+  // behave like a local spreadsheet.
   async function loadSheetRows(reset) {
     var tab = currentTab();
     if (!tab || tab.kind !== 'sheet') return;
     var q = $('sheet-search').value.trim();
-    if (reset) { state.sheetRows = []; state.sheetQuery = q; }
-    var res = await sb.rpc('search_sheet_rows', {
-      p_tab: tab.id, p_q: q, p_limit: SHEET_PAGE, p_offset: state.sheetRows.length,
-    });
-    if (res.error) {
-      toast('Could not load rows: ' + res.error.message, 'error', 6000);
-      return;
-    }
-    state.sheetRows = state.sheetRows.concat(res.data || []);
     if (reset) {
+      state.sheetRows = [];
+      state.sheetQuery = q;
+      state.fullSheet = false;
       var c = await sb.rpc('count_sheet_rows', { p_tab: tab.id, p_q: q });
-      state.sheetTotal = c.error ? state.sheetRows.length : Number(c.data);
+      state.sheetTotal = c.error ? 0 : Number(c.data);
     }
+    var page = isPhone() ? SHEET_PAGE : 1000;
+    var res;
+    do {
+      res = await sb.rpc('search_sheet_rows', {
+        p_tab: tab.id, p_q: q, p_limit: page, p_offset: state.sheetRows.length,
+      });
+      if (res.error) {
+        toast('Could not load rows: ' + res.error.message, 'error', 6000);
+        return;
+      }
+      state.sheetRows = state.sheetRows.concat(res.data || []);
+      if (!isPhone() && state.sheetRows.length < state.sheetTotal) {
+        $('count-label').textContent = 'Loading ' +
+          state.sheetRows.length.toLocaleString() + ' / ' +
+          state.sheetTotal.toLocaleString() + ' rows…';
+      }
+    } while (!isPhone() && state.sheetRows.length < state.sheetTotal &&
+             (res.data || []).length > 0);
+    // With everything in memory, search runs instantly on-device.
+    state.fullSheet = q === '' && state.sheetRows.length >= state.sheetTotal;
     renderSheet();
   }
 
   var sheetSearchTimer = null;
   function onSheetSearch() {
     clearTimeout(sheetSearchTimer);
+    if (state.fullSheet) {
+      state.sheetQuery = $('sheet-search').value.trim();
+      renderSheet();
+      return;
+    }
     sheetSearchTimer = setTimeout(function () { loadSheetRows(true); }, 350);
+  }
+
+  function rowMatchesQuery(row, q) {
+    return state.sheetCols.some(function (c) {
+      return sheetValue(row, c).toLowerCase().indexOf(q) >= 0;
+    });
   }
 
   function fetchOne(id) {
@@ -354,6 +393,7 @@
     var isSheet = !!(tab && tab.kind === 'sheet');
     $('tasks-view').classList.toggle('hidden', isSheet);
     $('sheet-view').classList.toggle('hidden', !isSheet);
+    $('btn-new').classList.toggle('hidden', !canEditCurrentTab());
     if (isSheet) { renderSheet(); return; }
 
     var rows = state.todos.filter(matchesFilters);
@@ -660,12 +700,6 @@
       summary: function (set) { return summarizePeople(set, 'Everyone'); },
       empty: 'No team members found.',
     },
-    tabvis: {
-      items: function () { return state.profiles.map(function (p) { return { id: p.id, label: p.display_name }; }); },
-      summary: function (set) { return summarizePeople(set, 'Everyone'); },
-      empty: 'No team members found.',
-      everyoneRow: 'Everyone (whole team)',
-    },
     cats: {
       // Non-admins can only tag records with categories they hold
       // "can create" permission for (the database enforces it too).
@@ -696,7 +730,6 @@
   }
 
   function mselSet(key) {
-    if (key === 'tabvis') return tabModal.sel;
     return state.modal ? state.modal.sel[key] : new Set();
   }
 
@@ -764,6 +797,11 @@
   // ---------- inline status change ----------
 
   async function onInlineStatusChange(id, version, sel) {
+    if (!canEditCurrentTab()) {
+      toast('You have view-only access on this tab.', 'warn', 4000);
+      render();
+      return;
+    }
     sel.disabled = true;
     try {
       var res = await saveWithVersionCheck(id, version, { status: sel.value });
@@ -787,6 +825,10 @@
   // ---------- delete ----------
 
   async function onDelete(t) {
+    if (!canEditCurrentTab()) {
+      toast('You have view-only access on this tab.', 'warn', 4000);
+      return;
+    }
     var ok = window.confirm('Delete "' + t.title + '"?\nThis removes it (and its attachments) for the whole team.');
     if (!ok) return;
     try {
@@ -862,6 +904,7 @@
     renderAttachments();
     if (mode === 'edit') loadAttachments();
     $('btn-save').textContent = 'Save';
+    $('btn-save').classList.toggle('hidden', !canEditCurrentTab());
     $('modal-backdrop').classList.remove('hidden');
     autoGrowAll(); // must run while visible, or scrollHeight reads 0
     $('rec-title').focus();
@@ -1322,6 +1365,11 @@
   }
 
   async function onModalSave(e) {
+    if (!canEditCurrentTab()) {
+      e.preventDefault();
+      setModalError('You have view-only access on this tab.');
+      return;
+    }
     e.preventDefault();
     var m = state.modal;
     if (!m) return;
@@ -1506,6 +1554,7 @@
     $('sheet-search').value = '';
     state.sheetQuery = '';
     state.sheetTotal = 0;
+    state.fullSheet = false;
     $('filter-status').value = '';
     reload(true);
   }
@@ -1515,9 +1564,14 @@
     strip.replaceChildren.apply(strip, state.tabs.map(function (t) {
       var b = el('button', 'tab-btn' + (t.id === state.currentTabId ? ' active' : ''), t.name);
       b.type = 'button';
-      if ((t.visible_to || []).length > 0) {
+      var team = state.profiles.filter(function (p) { return p.role !== 'admin'; });
+      var excluded = team.some(function (p) { return (t.visible_to || []).indexOf(p.id) < 0; });
+      if (excluded) {
         var lock = el('span', 'tab-lock', '\u{1F512}');
-        lock.title = 'Only visible to: ' + t.visible_to.map(profileName).join(', ') + ' (and admins)';
+        var names = (t.visible_to || []).map(profileName).filter(Boolean);
+        lock.title = names.length
+          ? 'Only visible to: ' + names.join(', ') + ' (and admins)'
+          : 'Only visible to admins';
         b.appendChild(lock);
       }
       b.addEventListener('click', function () { switchTab(t.id); });
@@ -1529,24 +1583,223 @@
 
   // ---------- tab settings (admins) ----------
 
-  var tabModal = { open: false, mode: 'edit', sel: new Set() };
+  var tabModal = { open: false, mode: 'edit', view: new Set(), edit: new Set(),
+    cols: [], deletedColIds: [] };
+
+  var COL_KINDS = [
+    ['text', 'Free text'],
+    ['textarea', 'Free text (long)'],
+    ['number', 'Number'],
+    ['date', 'Date'],
+    ['picklist', 'Dropdown list'],
+    ['checkbox', 'Checkbox'],
+    ['autonumber', 'Auto number'],
+  ];
 
   function openTabModal(mode) {
     var t = currentTab();
     if (mode === 'edit' && !t) return;
     tabModal.open = true;
     tabModal.mode = mode;
-    tabModal.sel = new Set(mode === 'edit' ? (t.visible_to || []) : []);
+    tabModal.view = new Set(mode === 'edit' ? (t.visible_to || []) : []);
+    tabModal.edit = new Set(mode === 'edit' ? (t.editable_by || []) : []);
+    tabModal.deletedColIds = [];
+    tabModal.cols = (mode === 'edit' && t.kind === 'sheet')
+      ? state.sheetCols.map(function (c) {
+          return { id: c.id, key: c.key, name: c.name, kind: c.kind,
+                   options: (c.options || []).slice() };
+        })
+      : [];
     $('tab-modal-title').textContent = mode === 'create' ? 'New tab' : 'Tab settings';
     $('tab-name').value = mode === 'edit' ? t.name : '';
     $('tab-kind-row').classList.toggle('hidden', mode !== 'create');
     $('tab-kind').value = 'tasks';
     $('btn-tab-delete').classList.toggle('hidden', mode !== 'edit');
     setTabError(null);
-    updateMselSummary('tabvis');
-    closeAllPanels();
+    renderTabPerms();
+    updateTabColsVisibility();
+    renderTabCols();
     $('tab-backdrop').classList.remove('hidden');
     $('tab-name').focus();
+  }
+
+  function tabModalKind() {
+    return tabModal.mode === 'create' ? $('tab-kind').value
+      : (currentTab() ? currentTab().kind : 'tasks');
+  }
+
+  function updateTabColsVisibility() {
+    var isSheet = tabModalKind() === 'sheet';
+    $('tab-cols-wrap').classList.toggle('hidden', !isSheet);
+    var card = $('tab-backdrop').querySelector('.modal');
+    if (card) card.classList.toggle('modal-wide', isSheet);
+  }
+
+  // Everyone on the team, two ticks each: view (read-only) and edit.
+  function renderTabPerms() {
+    var wrap = $('tab-perms');
+    wrap.replaceChildren();
+    var people = state.profiles.filter(function (p) { return p.role !== 'admin'; });
+    if (people.length === 0) {
+      wrap.appendChild(el('div', 'muted small',
+        'Everyone on the team is an admin, so everyone already sees every tab.'));
+      return;
+    }
+    var table = el('table', 'perm-table');
+    var thead = el('thead');
+    var hr = el('tr');
+    hr.appendChild(el('th', null, 'Team member'));
+    hr.appendChild(el('th', null, 'Can view'));
+    hr.appendChild(el('th', null, 'Can edit'));
+    thead.appendChild(hr);
+    table.appendChild(thead);
+    var tbody = el('tbody');
+    people.forEach(function (p) {
+      var tr = el('tr');
+      tr.appendChild(el('td', 'perm-cat-name', p.display_name));
+      var tdV = el('td');
+      var cbV = document.createElement('input');
+      cbV.type = 'checkbox';
+      cbV.checked = tabModal.view.has(p.id);
+      var tdE = el('td');
+      var cbE = document.createElement('input');
+      cbE.type = 'checkbox';
+      cbE.checked = tabModal.edit.has(p.id);
+      cbV.addEventListener('change', function () {
+        if (cbV.checked) { tabModal.view.add(p.id); }
+        else { tabModal.view.delete(p.id); tabModal.edit.delete(p.id); cbE.checked = false; }
+      });
+      cbE.addEventListener('change', function () {
+        if (cbE.checked) { tabModal.edit.add(p.id); tabModal.view.add(p.id); cbV.checked = true; }
+        else { tabModal.edit.delete(p.id); }
+      });
+      tdV.appendChild(cbV);
+      tdE.appendChild(cbE);
+      tr.appendChild(tdV);
+      tr.appendChild(tdE);
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+  }
+
+  // ----- column editor (sheet tabs) -----
+
+  function renderTabCols() {
+    var wrap = $('tab-cols');
+    wrap.replaceChildren();
+    if (tabModal.cols.length === 0) {
+      wrap.appendChild(el('div', 'muted small', 'No columns yet — add the first one below.'));
+    }
+    tabModal.cols.forEach(function (col, i) {
+      var row = el('div', 'tab-cols-row');
+      var up = el('button', 'btn ghost btn-small colmove', '\u2191');
+      up.type = 'button';
+      up.title = 'Move up';
+      up.disabled = i === 0;
+      up.addEventListener('click', function () {
+        tabModal.cols.splice(i - 1, 0, tabModal.cols.splice(i, 1)[0]);
+        renderTabCols();
+      });
+      var down = el('button', 'btn ghost btn-small colmove', '\u2193');
+      down.type = 'button';
+      down.title = 'Move down';
+      down.disabled = i === tabModal.cols.length - 1;
+      down.addEventListener('click', function () {
+        tabModal.cols.splice(i + 1, 0, tabModal.cols.splice(i, 1)[0]);
+        renderTabCols();
+      });
+      var name = document.createElement('input');
+      name.type = 'text';
+      name.maxLength = 60;
+      name.placeholder = 'Column name';
+      name.value = col.name;
+      name.addEventListener('input', function () { col.name = name.value; });
+      var kind = document.createElement('select');
+      COL_KINDS.forEach(function (k) {
+        var o = el('option', null, k[1]);
+        o.value = k[0];
+        if (col.kind === k[0]) o.selected = true;
+        kind.appendChild(o);
+      });
+      if (col.kind === 'contact') {   // legacy kind from older sheets
+        var oc = el('option', null, 'Contact');
+        oc.value = 'contact';
+        oc.selected = true;
+        kind.appendChild(oc);
+      }
+      kind.addEventListener('change', function () { col.kind = kind.value; renderTabCols(); });
+      var del = el('button', 'btn ghost btn-small danger-text colmove', '\u2715');
+      del.type = 'button';
+      del.title = 'Remove this column';
+      del.addEventListener('click', function () {
+        if (col.id && !window.confirm('Remove the column "' + (col.name || '') + '"?\n\n' +
+          'Its values stay stored but disappear from the sheet.')) return;
+        if (col.id) tabModal.deletedColIds.push(col.id);
+        tabModal.cols.splice(i, 1);
+        renderTabCols();
+      });
+      row.appendChild(up);
+      row.appendChild(down);
+      row.appendChild(name);
+      row.appendChild(kind);
+      row.appendChild(del);
+      wrap.appendChild(row);
+      if (col.kind === 'picklist') {
+        var opts = document.createElement('textarea');
+        opts.className = 'tab-cols-opts';
+        opts.rows = Math.min(6, Math.max(2, (col.options || []).length));
+        opts.placeholder = 'Dropdown choices — one per line';
+        opts.value = (col.options || []).join('\n');
+        opts.addEventListener('input', function () {
+          col.options = opts.value.split(/\r\n|\r|\n/)
+            .map(function (s) { return s.trim(); })
+            .filter(Boolean);
+        });
+        wrap.appendChild(opts);
+      }
+    });
+  }
+
+  function slugKey(name, taken) {
+    var base = String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '').slice(0, 40) || 'col';
+    var key = base;
+    var k = 2;
+    while (taken.has(key)) { key = base + '_' + k; k++; }
+    taken.add(key);
+    return key;
+  }
+
+  // Applies the modal's column list: delete removed, update kept, insert new.
+  // Positions follow the list order; renames keep the key, so data survives.
+  async function saveTabColumns(tabId) {
+    if (tabModal.deletedColIds.length > 0) {
+      var d = await sb.from('sheet_columns').delete().in('id', tabModal.deletedColIds);
+      if (d.error) throw d.error;
+    }
+    var taken = new Set(tabModal.cols.filter(function (c) { return c.key; })
+      .map(function (c) { return c.key; }));
+    var updates = [];
+    var inserts = [];
+    tabModal.cols.forEach(function (col, i) {
+      var options = col.kind === 'picklist' ? (col.options || []) : [];
+      if (col.id) {
+        updates.push({ id: col.id, tab_id: tabId, key: col.key, name: col.name.trim(),
+          kind: col.kind, options: options, position: i });
+      } else {
+        inserts.push({ tab_id: tabId, key: slugKey(col.name, taken), name: col.name.trim(),
+          kind: col.kind, options: options, position: i });
+      }
+    });
+    if (updates.length > 0) {
+      var u = await sb.from('sheet_columns').upsert(updates);
+      if (u.error) throw u.error;
+    }
+    if (inserts.length > 0) {
+      var ins = await sb.from('sheet_columns').insert(inserts);
+      if (ins.error) throw ins.error;
+    }
   }
 
   function closeTabModal() {
@@ -1568,22 +1821,39 @@
     btn.disabled = true;
     setTabError(null);
     try {
+      tabModal.edit.forEach(function (id) { tabModal.view.add(id); }); // edit implies view
+      var kind = tabModalKind();
+      if (kind === 'sheet') {
+        var unnamed = tabModal.cols.find(function (c) { return !c.name.trim(); });
+        if (unnamed) { setTabError('Every column needs a name.'); btn.disabled = false; return; }
+        var noOpts = tabModal.cols.find(function (c) {
+          return c.kind === 'picklist' && (c.options || []).length === 0;
+        });
+        if (noOpts) {
+          setTabError('The dropdown column "' + noOpts.name + '" needs at least one choice.');
+          btn.disabled = false;
+          return;
+        }
+      }
       if (tabModal.mode === 'create') {
         var maxPos = state.tabs.reduce(function (m, t) { return Math.max(m, t.position || 0); }, -1);
         var ins = await sb.from('tabs').insert({
           name: name,
-          kind: $('tab-kind').value,
+          kind: kind,
           position: maxPos + 1,
-          visible_to: Array.from(tabModal.sel),
+          visible_to: Array.from(tabModal.view),
+          editable_by: Array.from(tabModal.edit),
         }).select('*').single();
         if (ins.error) throw ins.error;
+        if (kind === 'sheet') await saveTabColumns(ins.data.id);
         state.currentTabId = ins.data.id;
         try { window.localStorage.setItem('tenways.tab', ins.data.id); } catch (e) { /* ignore */ }
         toast('Tab "' + ins.data.name + '" created', 'ok');
       } else {
         var t = currentTab();
         var upd = await sb.from('tabs')
-          .update({ name: name, visible_to: Array.from(tabModal.sel) })
+          .update({ name: name, visible_to: Array.from(tabModal.view),
+                    editable_by: Array.from(tabModal.edit) })
           .eq('id', t.id).eq('version', t.version).select('*');
         if (upd.error) throw upd.error;
         if (!upd.data || upd.data.length === 0) {
@@ -1592,6 +1862,7 @@
           await reload(false);
           return;
         }
+        if (t.kind === 'sheet') await saveTabColumns(t.id);
         toast('Tab updated', 'ok');
       }
       closeTabModal();
@@ -1635,6 +1906,10 @@
   function renderSheet() {
     var cols = state.sheetCols;
     var rows = state.sheetRows;
+    if (state.fullSheet && state.sheetQuery) {
+      var q = state.sheetQuery.toLowerCase();
+      rows = rows.filter(function (r) { return rowMatchesQuery(r, q); });
+    }
     var head = $('sheet-head');
     var body = $('sheet-body');
 
@@ -1643,6 +1918,7 @@
     $('sheet-empty').classList.toggle('hidden', !(cols.length > 0 && rows.length === 0 && !searching));
     $('sheet-nomatch').classList.toggle('hidden', !(rows.length === 0 && searching));
     $('btn-new-row').disabled = cols.length === 0;
+    $('btn-new-row').classList.toggle('hidden', !canEditCurrentTab());
 
     // <colgroup> drives the widths, which is what makes dragging work
     var table = $('sheet-table');
@@ -1677,7 +1953,7 @@
     });
     head.replaceChildren(hr);
 
-    body.replaceChildren.apply(body, rows.map(function (row) {
+    function buildTr(row) {
       var status = row.data ? String(row.data.status || '').toLowerCase() : '';
       var tint = (status === 'green' || status === 'yellow' || status === 'red') ? ' st-' + status : '';
       var tr = el('tr', 'sheet-row-open' + tint);
@@ -1692,15 +1968,37 @@
       });
       tr.addEventListener('click', function () { openRowModal('edit', row); });
       return tr;
-    }));
+    }
+
+    // Thousands of rows are appended in chunks so the app never freezes.
+    var token = ++state.renderToken;
+    body.replaceChildren();
+    var i = 0;
+    (function chunk() {
+      if (token !== state.renderToken) return;   // a newer render took over
+      var frag = document.createDocumentFragment();
+      for (var k = 0; k < 500 && i < rows.length; k++, i++) frag.appendChild(buildTr(rows[i]));
+      body.appendChild(frag);
+      if (i < rows.length) window.requestAnimationFrame(chunk);
+    })();
 
     var total = state.sheetTotal;
-    var label = total + (total === 1 ? ' row' : ' rows');
-    if (state.sheetQuery) label += ' matching "' + state.sheetQuery + '"';
-    if (rows.length < total) label += ' · showing first ' + rows.length;
+    var label;
+    if (state.fullSheet) {
+      label = state.sheetQuery
+        ? rows.length.toLocaleString() + ' of ' + total.toLocaleString() +
+          ' rows match "' + state.sheetQuery + '"'
+        : total.toLocaleString() + (total === 1 ? ' row' : ' rows');
+      $('btn-sheet-more').classList.add('hidden');
+    } else {
+      label = total.toLocaleString() + (total === 1 ? ' row' : ' rows');
+      if (state.sheetQuery) label += ' matching "' + state.sheetQuery + '"';
+      if (state.sheetRows.length < total) label += ' · showing first ' + state.sheetRows.length.toLocaleString();
+      $('btn-sheet-more').classList.toggle('hidden', state.sheetRows.length >= total);
+      $('btn-sheet-more').textContent = 'Load more rows (' +
+        (total - state.sheetRows.length).toLocaleString() + ' left)';
+    }
     $('count-label').textContent = label;
-    $('btn-sheet-more').classList.toggle('hidden', rows.length >= total);
-    $('btn-sheet-more').textContent = 'Load more rows (' + (total - rows.length) + ' left)';
   }
 
   // Drag the right edge of a header cell to resize, exactly like a
@@ -1715,8 +2013,22 @@
     var startW = parseInt(colEl.style.width, 10) || colWidth(col);
     document.body.classList.add('col-resizing');
 
+    // A column can be dragged no narrower than its header text (capped at
+    // 20 characters), so the header never gets swallowed.
+    var minW = 56;
+    var th = table.querySelectorAll('#sheet-head th')[index + 1];
+    if (th) {
+      var cs = window.getComputedStyle(th);
+      var canvas = startColumnResize._c || (startColumnResize._c = document.createElement('canvas'));
+      var ctx = canvas.getContext('2d');
+      ctx.font = cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily;
+      var label = col.name.length > 20 ? col.name.slice(0, 20) : col.name;
+      if (cs.textTransform === 'uppercase') label = label.toUpperCase();
+      minW = Math.max(40, Math.ceil(ctx.measureText(label).width * 1.04) + 18);
+    }
+
     function onMove(e) {
-      var w = Math.max(56, startW + (e.clientX - startX));
+      var w = Math.max(minW, startW + (e.clientX - startX));
       colEl.style.width = w + 'px';
     }
     function onUp() {
@@ -1770,6 +2082,11 @@
           extra.selected = true;
           input.appendChild(extra);
         }
+      } else if (c.kind === 'autonumber') {
+        input = document.createElement('input');
+        input.type = 'text';
+        input.readOnly = true;
+        input.value = v == null ? '(assigned automatically)' : String(v);
       } else {
         input = document.createElement('input');
         input.type = c.kind === 'number' ? 'number' : (c.kind === 'date' ? 'date' : 'text');
@@ -1787,6 +2104,13 @@
       var input = $(rowFieldId(c));
       if (!input) return;
       if (c.kind === 'checkbox') { data[c.key] = !!input.checked; return; }
+      if (c.kind === 'autonumber') {
+        // never typed by hand: keep what the row has; the database assigns
+        // the next number when a new row is inserted
+        var kept = rowModal && rowModal.origData ? rowModal.origData[c.key] : null;
+        if (kept !== null && kept !== undefined) data[c.key] = kept;
+        return;
+      }
       var val = input.value;
       if (val === '') { data[c.key] = null; return; }
       data[c.key] = c.kind === 'number' ? Number(val) : val;
@@ -1801,7 +2125,8 @@
   }
 
   function openRowModal(mode, row) {
-    rowModal = { mode: mode, id: row ? row.id : null, version: row ? row.version : null };
+    rowModal = { mode: mode, id: row ? row.id : null, version: row ? row.version : null,
+      origData: (row && row.data) ? row.data : {} };
     $('row-modal-title').textContent = mode === 'create' ? 'New row' : 'Edit row';
     $('row-conflict').classList.add('hidden');
     setRowError(null);
@@ -1811,6 +2136,15 @@
           ? 'Last edited by ' + profileName(row.updated_by) + ' ' + relTime(row.updated_at)
           : 'Imported from Smartsheet') + ' · version ' + row.version;
     buildRowFields(row);
+    var editable = canEditCurrentTab();
+    $('btn-row-save').classList.toggle('hidden', !editable);
+    if (!editable) {
+      $('btn-row-delete').classList.add('hidden');
+      $('row-fields').querySelectorAll('input, select, textarea').forEach(function (f) {
+        f.disabled = true;
+      });
+      $('row-meta').textContent += ' · view only';
+    }
     $('row-backdrop').classList.remove('hidden');
   }
 
@@ -1822,6 +2156,7 @@
   async function saveRow(e) {
     e.preventDefault();
     if (!rowModal) return;
+    if (!canEditCurrentTab()) { setRowError('You have view-only access on this tab.'); return; }
     var btn = $('btn-row-save');
     btn.disabled = true;
     setRowError(null);
@@ -1978,12 +2313,21 @@
     $('btn-new-tab').addEventListener('click', function () { openTabModal('create'); });
     $('btn-tab-settings').addEventListener('click', function () { openTabModal('edit'); });
     $('btn-tab-save').addEventListener('click', saveTab);
+    $('tab-kind').addEventListener('change', function () {
+      updateTabColsVisibility();
+      renderTabCols();
+    });
+    $('btn-tab-addcol').addEventListener('click', function () {
+      tabModal.cols.push({ id: null, key: null, name: '', kind: 'text', options: [] });
+      renderTabCols();
+      var inputs = $('tab-cols').querySelectorAll('input[type="text"]');
+      if (inputs.length) inputs[inputs.length - 1].focus();
+    });
     $('btn-tab-delete').addEventListener('click', deleteTab);
     $('btn-tab-cancel').addEventListener('click', closeTabModal);
     $('tab-backdrop').addEventListener('mousedown', function (e) {
       if (e.target === e.currentTarget) closeTabModal();
     });
-    $('msel-btn-tabvis').addEventListener('click', function () { toggleMselPanel('tabvis'); });
 
     $('btn-new-row').addEventListener('click', function () { openRowModal('create', null); });
     $('row-form').addEventListener('submit', saveRow);

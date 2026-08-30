@@ -6,16 +6,16 @@
         content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src https: wss:; base-uri 'none'; form-action 'none'" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#4f46e5" />
-  <link rel="manifest" href="manifest.webmanifest?v=1.6.1" />
+  <link rel="manifest" href="manifest.webmanifest?v=1.7.0" />
   <link rel="icon" href="icons/icon-192.png" />
   <link rel="apple-touch-icon" href="icons/icon-180.png" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="TENWAYS Tasks" />
-  <meta name="app-version" content="1.6.1" />
+  <meta name="app-version" content="1.7.0" />
   <title>TENWAYS Task Manager</title>
-  <link rel="stylesheet" href="styles.css?v=1.6.1" />
+  <link rel="stylesheet" href="styles.css?v=1.7.0" />
 </head>
 <body>
 
@@ -82,6 +82,7 @@
         <span id="live-label" class="muted small">connecting&hellip;</span>
       </div>
       <div class="topbar-right">
+        <button class="btn ghost hidden" id="btn-admin" title="Users, roles, passwords and access (admins only)">Admin</button>
         <button class="btn ghost" id="btn-refresh" title="Reload records now">&#10227; Refresh</button>
         <span id="me-label" class="muted small"></span>
         <button class="btn ghost" id="btn-signout">Sign out</button>
@@ -114,7 +115,6 @@
           <option value="">All assignees</option>
         </select>
         <button class="btn ghost hidden" id="btn-categories" title="Add or rename categories (admins only)">Categories&hellip;</button>
-        <button class="btn ghost hidden" id="btn-admin" title="Users, credentials and access (admins only)">Admin</button>
       </div>
 
       <div class="table-wrap">
@@ -276,7 +276,8 @@
         email is involved, and it works even when public sign-ups are switched off in Supabase.
         The category boxes control what each user can see and where they can create records;
         records without categories are visible to the whole team, and a record&rsquo;s creator and
-        assignees always see it. Admins always have full access.</p>
+        assignees always see it. Admins always have full access. Which tabs a person can open
+        &mdash; and whether they can change anything there &mdash; is set per tab with the &#9881; Tab button.</p>
 
       <div class="admin-add">
         <h3>Add a user</h3>
@@ -351,20 +352,25 @@
         <input type="text" id="tab-name" maxlength="60" />
       </label>
       <div class="field">
-        <span>Visible to</span>
-        <div class="msel">
-          <button type="button" class="msel-btn" id="msel-btn-tabvis">Everyone</button>
-          <div class="msel-panel hidden" id="msel-panel-tabvis"></div>
-        </div>
+        <span>Who can use this tab</span>
+        <div id="tab-perms"></div>
       </div>
-      <p class="muted small">Leave &ldquo;Visible to&rdquo; empty and the whole team sees this tab.
-        Admins always see every tab.</p>
+      <p class="muted small">&ldquo;Can view&rdquo; alone is read-only; &ldquo;Can edit&rdquo; also allows
+        adding and changing things. Tick nobody and only admins see the tab.
+        Admins always have full access.</p>
       <div id="tab-kind-row" class="field hidden">
         <span>Tab type</span>
         <select id="tab-kind">
           <option value="tasks">Task list &mdash; records with categories, assignees and due dates</option>
           <option value="sheet">Sheet &mdash; a grid of columns you define</option>
         </select>
+      </div>
+      <div id="tab-cols-wrap" class="field hidden">
+        <span>Columns</span>
+        <div id="tab-cols"></div>
+        <button type="button" class="btn ghost btn-small" id="btn-tab-addcol">&#65291; Add column</button>
+        <p class="muted small">Use the arrows to reorder. Renaming a column keeps its data;
+          deleting one hides its data from the sheet.</p>
       </div>
       <div id="tab-error" class="form-error hidden"></div>
       <div class="modal-buttons">
@@ -378,10 +384,10 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="vendor/supabase.js?v=1.6.1"></script>
-  <script src="config.js?v=1.6.1"></script>
-  <script src="js/client.js?v=1.6.1"></script>
-  <script src="js/app.js?v=1.6.1"></script>
-  <script src="js/auth.js?v=1.6.1"></script>
+  <script src="vendor/supabase.js?v=1.7.0"></script>
+  <script src="config.js?v=1.7.0"></script>
+  <script src="js/client.js?v=1.7.0"></script>
+  <script src="js/app.js?v=1.7.0"></script>
+  <script src="js/auth.js?v=1.7.0"></script>
 </body>
 </html>

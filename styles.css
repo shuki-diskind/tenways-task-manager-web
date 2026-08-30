@@ -841,3 +841,13 @@ th.sheet-gutter { z-index: 3; }
   #sheet-body tr.st-red    { border-left: 4px solid rgba(239, 68, 68, 0.85); }
   #sheet-view .table-wrap { max-height: none; overflow: visible; }
 }
+
+/* per-tab access table + column editor (tab settings) */
+#tab-perms .perm-table { width: 100%; }
+.tab-cols-row { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; }
+.tab-cols-row input[type="text"] { flex: 1; min-width: 0; }
+.tab-cols-row select { width: 150px; flex: none; }
+.colmove { padding: 4px 8px; flex: none; }
+.tab-cols-opts { width: 100%; margin: -2px 0 8px; }
+.modal-wide { max-width: 720px; width: min(720px, calc(100vw - 32px)); }
+#row-fields input[readonly] { color: var(--muted); }
