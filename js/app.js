@@ -18,6 +18,8 @@
     'creator:profiles!todos_created_by_fkey(display_name,email)',
   ].join(',');
 
+  var SHEET_PAGE = 200;   // rows fetched per request
+
   var SHEET_ROW_SELECT = [
     'id', 'tab_id', 'position', 'data', 'version', 'created_at', 'updated_at',
     'created_by', 'updated_by',
@@ -37,7 +39,9 @@
     tabs: [],           // every tab this user may see
     currentTabId: null, // which tab is on screen
     sheetCols: [],      // column definitions of the current sheet tab
-    sheetRows: [],      // rows of the current sheet tab
+    sheetRows: [],      // rows of the current sheet tab (paged)
+    sheetTotal: 0,      // how many rows match on the server
+    sheetQuery: '',     // the search the loaded rows belong to
     channel: null,
     modal: null,        // { mode, id, version, current, sel: {assigned,visible,cats} }
     reloadTimer: null,
@@ -179,13 +183,32 @@
       });
   }
 
-  function fetchSheetRows(tabId) {
-    return sb.from('sheet_rows').select(SHEET_ROW_SELECT)
-      .eq('tab_id', tabId).order('position')
-      .then(function (res) {
-        if (res.error) throw res.error;
-        return res.data;
-      });
+  // Sheets are read through RPCs so the database does the searching and
+  // paging; they run as the caller, so tab visibility still applies.
+  async function loadSheetRows(reset) {
+    var tab = currentTab();
+    if (!tab || tab.kind !== 'sheet') return;
+    var q = $('sheet-search').value.trim();
+    if (reset) { state.sheetRows = []; state.sheetQuery = q; }
+    var res = await sb.rpc('search_sheet_rows', {
+      p_tab: tab.id, p_q: q, p_limit: SHEET_PAGE, p_offset: state.sheetRows.length,
+    });
+    if (res.error) {
+      toast('Could not load rows: ' + res.error.message, 'error', 6000);
+      return;
+    }
+    state.sheetRows = state.sheetRows.concat(res.data || []);
+    if (reset) {
+      var c = await sb.rpc('count_sheet_rows', { p_tab: tab.id, p_q: q });
+      state.sheetTotal = c.error ? state.sheetRows.length : Number(c.data);
+    }
+    renderSheet();
+  }
+
+  var sheetSearchTimer = null;
+  function onSheetSearch() {
+    clearTimeout(sheetSearchTimer);
+    sheetSearchTimer = setTimeout(function () { loadSheetRows(true); }, 350);
   }
 
   function fetchOne(id) {
@@ -207,11 +230,10 @@
 
       var tab = currentTab();
       if (tab && tab.kind === 'sheet') {
-        var s = await Promise.all([fetchSheetColumns(tab.id), fetchSheetRows(tab.id)]);
-        state.sheetCols = s[0];
-        state.sheetRows = s[1];
+        state.sheetCols = await fetchSheetColumns(tab.id);
         state.todos = [];
         state.categories = [];
+        await loadSheetRows(true);
       } else {
         var t = tab
           ? await Promise.all([fetchTodos(tab.id), fetchCategories(tab.id)])
@@ -1452,6 +1474,8 @@
     try { window.localStorage.setItem('tenways.tab', id); } catch (e) { /* private mode */ }
     $('search-box').value = '';
     $('sheet-search').value = '';
+    state.sheetQuery = '';
+    state.sheetTotal = 0;
     $('filter-status').value = '';
     reload(true);
   }
@@ -1578,23 +1602,16 @@
     return String(v);
   }
 
-  function sheetMatches(row) {
-    var q = $('sheet-search').value.trim().toLowerCase();
-    if (!q) return true;
-    return state.sheetCols.some(function (c) {
-      return sheetValue(row, c).toLowerCase().indexOf(q) >= 0;
-    });
-  }
-
   function renderSheet() {
     var cols = state.sheetCols;
-    var rows = state.sheetRows.filter(sheetMatches);
+    var rows = state.sheetRows;
     var head = $('sheet-head');
     var body = $('sheet-body');
 
+    var searching = state.sheetQuery !== '';
     $('sheet-nocols').classList.toggle('hidden', cols.length > 0);
-    $('sheet-empty').classList.toggle('hidden', !(cols.length > 0 && state.sheetRows.length === 0));
-    $('sheet-nomatch').classList.toggle('hidden', !(state.sheetRows.length > 0 && rows.length === 0));
+    $('sheet-empty').classList.toggle('hidden', !(cols.length > 0 && rows.length === 0 && !searching));
+    $('sheet-nomatch').classList.toggle('hidden', !(rows.length === 0 && searching));
     $('btn-new-row').disabled = cols.length === 0;
 
     var hr = el('tr');
@@ -1614,10 +1631,13 @@
       return tr;
     }));
 
-    var total = state.sheetRows.length;
+    var total = state.sheetTotal;
     var label = total + (total === 1 ? ' row' : ' rows');
-    if (rows.length !== total) label += ' · showing ' + rows.length;
+    if (state.sheetQuery) label += ' matching "' + state.sheetQuery + '"';
+    if (rows.length < total) label += ' · showing first ' + rows.length;
     $('count-label').textContent = label;
+    $('btn-sheet-more').classList.toggle('hidden', rows.length >= total);
+    $('btn-sheet-more').textContent = 'Load more rows (' + (total - rows.length) + ' left)';
   }
 
   // ---------- sheet row editor ----------
@@ -1696,10 +1716,10 @@
     $('row-conflict').classList.add('hidden');
     setRowError(null);
     $('btn-row-delete').classList.toggle('hidden', mode !== 'edit');
-    $('row-meta').textContent = row
-      ? 'Last edited by ' + personName(row.editor) + ' ' + relTime(row.updated_at) +
-        ' · version ' + row.version
-      : '';
+    $('row-meta').textContent = !row ? ''
+      : (row.updated_by
+          ? 'Last edited by ' + profileName(row.updated_by) + ' ' + relTime(row.updated_at)
+          : 'Imported from Smartsheet') + ' · version ' + row.version;
     buildRowFields(row);
     $('row-backdrop').classList.remove('hidden');
   }
@@ -1718,12 +1738,14 @@
     try {
       var data = collectRowData();
       if (rowModal.mode === 'create') {
-        var maxPos = state.sheetRows.reduce(function (m, r) { return Math.max(m, r.position || 0); }, -1);
+        var maxPos = state.sheetRows.reduce(function (m, r) { return Math.max(m, r.position || 0); },
+          state.sheetTotal - 1);
         var ins = await sb.from('sheet_rows')
           .insert({ tab_id: state.currentTabId, position: maxPos + 1, data: data })
           .select(SHEET_ROW_SELECT).single();
         if (ins.error) throw ins.error;
-        state.sheetRows.push(ins.data);
+        state.sheetRows.unshift(ins.data);
+        state.sheetTotal += 1;
         closeRowModal();
         renderSheet();
         toast('Row added', 'ok');
@@ -1756,7 +1778,7 @@
       if (j >= 0) state.sheetRows[j] = cur.data;
       rowModal.version = cur.data.version;
       var c = $('row-conflict');
-      c.textContent = '⚠ This row was changed by ' + personName(cur.data.editor) + ' (' +
+      c.textContent = '⚠ This row was changed by ' + profileName(cur.data.updated_by) + ' (' +
         relTime(cur.data.updated_at) + ') while you were editing. Your edits have NOT been saved. ' +
         'Press Save again to replace their version with yours.';
       c.classList.remove('hidden');
@@ -1775,6 +1797,7 @@
       var res = await sb.from('sheet_rows').delete().eq('id', rowModal.id).select('id');
       if (res.error) throw res.error;
       state.sheetRows = state.sheetRows.filter(function (r) { return r.id !== rowModal.id; });
+      state.sheetTotal = Math.max(0, state.sheetTotal - 1);
       closeRowModal();
       renderSheet();
       toast('Row deleted', 'ok');
@@ -1879,7 +1902,8 @@
     $('row-backdrop').addEventListener('mousedown', function (e) {
       if (e.target === e.currentTarget) closeRowModal();
     });
-    $('sheet-search').addEventListener('input', renderSheet);
+    $('sheet-search').addEventListener('input', onSheetSearch);
+    $('btn-sheet-more').addEventListener('click', function () { loadSheetRows(false); });
 
     $('search-box').addEventListener('input', render);
     $('filter-status').addEventListener('change', render);

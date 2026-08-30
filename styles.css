@@ -727,3 +727,5 @@ tbody tr:hover td { background: var(--row-hover); }
   #sheet-body td.sheet-first { font-weight: 700; font-size: 15px; }
   #sheet-body td.sheet-first::before { display: none; }
 }
+
+.sheet-more { text-align: center; padding: 10px 0 4px; }
