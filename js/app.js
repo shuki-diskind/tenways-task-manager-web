@@ -499,7 +499,7 @@
       return p ? p.display_name : null;  // skip ids whose profile is gone
     }).filter(Boolean);
     tdAsg.appendChild(el('div', 'assigned-names' + (asgIds.length === 0 ? ' muted' : ''),
-      asgIds.length === 0 ? 'Everyone' : (asgNames.join(', ') || '—')));
+      asgIds.length === 0 ? 'Unassigned' : (asgNames.join(', ') || '—')));
     tr.appendChild(tdAsg);
 
     var tdCr = el('td', 'col-created');
@@ -558,7 +558,7 @@
     var all = el('option', null, 'All assignees');
     all.value = '';
     selEl.appendChild(all);
-    var everyone = el('option', null, 'Everyone (whole team)');
+    var everyone = el('option', null, 'Unassigned');
     everyone.value = '__everyone__';
     selEl.appendChild(everyone);
     state.profiles.forEach(function (p) {
@@ -722,11 +722,11 @@
   var MSELS = {
     assigned: {
       items: function () { return state.profiles.map(function (p) { return { id: p.id, label: p.display_name }; }); },
-      summary: function (set) { return summarizePeople(set, 'Everyone'); },
+      summary: function (set) { return summarizePeople(set, 'No one'); },
       empty: 'No team members found.',
-      // Nobody ticked = assigned to the whole team. The panel shows an
-      // "Everyone" row that is on by default; ticking a person replaces it.
-      everyoneRow: 'Everyone (whole team)',
+      // Nobody ticked = unassigned. The panel shows a "No one" row that is
+      // on by default; ticking a person replaces it.
+      everyoneRow: 'No one (unassigned)',
     },
     visible: {
       items: function () { return state.profiles.map(function (p) { return { id: p.id, label: p.display_name }; }); },
