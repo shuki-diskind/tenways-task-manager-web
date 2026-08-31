@@ -908,6 +908,7 @@ th.sheet-gutter { z-index: 3; }
 }
 .cell-menu button:hover { background: rgba(120, 130, 150, 0.14); }
 .row-link-input { margin-top: 4px; }
+.attach-row input[type="text"] { flex: 1; min-width: 0; }
 .link-toggle { border: 0; background: none; cursor: pointer; padding: 0 4px; opacity: 0.5; font-size: 13px; }
 .link-toggle.on { opacity: 1; }
 

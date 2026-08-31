@@ -1029,6 +1029,16 @@
     if (!m) return;
     var files = m.attachments || [];
     files.forEach(function (f) {
+      if (m.attachRename === f.name) {
+        list.appendChild(buildAttachRenameRow(f, m.id, function () {
+          m.attachRename = null;
+          loadAttachments();
+        }, function () {
+          m.attachRename = null;
+          renderAttachments();
+        }));
+        return;
+      }
       var row = el('div', 'attach-row');
       var name = el('a', 'attach-name', displayFileName(f.name));
       name.href = '#';
@@ -1039,6 +1049,14 @@
       });
       row.appendChild(name);
       row.appendChild(el('span', 'attach-size muted small', fmtSize(f.metadata && f.metadata.size)));
+      var ren = el('button', 'icon-btn', '✎');
+      ren.type = 'button';
+      ren.title = 'Rename attachment';
+      ren.addEventListener('click', function () {
+        m.attachRename = f.name;
+        renderAttachments();
+      });
+      row.appendChild(ren);
       var del = el('button', 'icon-btn danger', '✕');
       del.type = 'button';
       del.title = 'Delete attachment';
@@ -1111,6 +1129,62 @@
     }
     toast('Attachment deleted', 'ok');
     loadAttachments();
+  }
+
+  // Renaming keeps the hidden upload-timestamp prefix (ordering and
+  // uniqueness) and the old extension if the new name dropped it.
+  async function renameAttachment(folderId, oldName, newDisplay) {
+    var base = String(newDisplay || '').trim();
+    if (!base) {
+      toast('Enter a file name.', 'warn', 4000);
+      return false;
+    }
+    var oldExt = (oldName.match(/(\.[A-Za-z0-9]{1,8})$/) || [])[1] || '';
+    if (oldExt && base.toLowerCase().slice(-oldExt.length) !== oldExt.toLowerCase()) {
+      base += oldExt;
+    }
+    var safe = base.replace(/[^\w.\-()]+/g, '_').slice(0, 140);
+    var pre = oldName.match(/^(\d+_)/);
+    var newName = (pre ? pre[1] : '') + safe;
+    if (newName === oldName) return true;
+    var res = await sb.storage.from('attachments')
+      .move(folderId + '/' + oldName, folderId + '/' + newName);
+    if (res.error) {
+      toast('Could not rename: ' + res.error.message, 'error', 6000);
+      return false;
+    }
+    toast('Attachment renamed', 'ok');
+    return true;
+  }
+
+  function buildAttachRenameRow(f, folderId, onDone, onCancel) {
+    var row = el('div', 'attach-row');
+    var input = document.createElement('input');
+    input.type = 'text';
+    input.maxLength = 140;
+    input.autocomplete = 'off';
+    input.spellcheck = false;
+    input.value = displayFileName(f.name);
+    var save = el('button', 'btn primary btn-small', 'Rename');
+    save.type = 'button';
+    save.addEventListener('click', function () {
+      save.disabled = true;
+      renameAttachment(folderId, f.name, input.value).then(function (ok) {
+        if (ok) onDone(); else save.disabled = false;
+      });
+    });
+    var cancel = el('button', 'btn ghost btn-small', 'Cancel');
+    cancel.type = 'button';
+    cancel.addEventListener('click', onCancel);
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); save.click(); }
+      else if (e.key === 'Escape') { e.stopPropagation(); onCancel(); }
+    });
+    row.appendChild(input);
+    row.appendChild(save);
+    row.appendChild(cancel);
+    setTimeout(function () { input.focus(); input.select(); }, 0);
+    return row;
   }
 
   // ---------- admin area (users, credentials, category access) ----------
@@ -2248,6 +2322,16 @@
     var canEdit = canEditCurrentTab();
     var files = m.attachments || [];
     files.forEach(function (f) {
+      if (canEdit && m.attachRename === f.name) {
+        list.appendChild(buildAttachRenameRow(f, m.id, function () {
+          m.attachRename = null;
+          rowLoadAttachments();
+        }, function () {
+          m.attachRename = null;
+          renderRowAttachments();
+        }));
+        return;
+      }
       var row = el('div', 'attach-row');
       var name = el('a', 'attach-name', displayFileName(f.name));
       name.href = '#';
@@ -2259,6 +2343,14 @@
       row.appendChild(name);
       row.appendChild(el('span', 'attach-size muted small', fmtSize(f.metadata && f.metadata.size)));
       if (canEdit) {
+        var ren = el('button', 'icon-btn', '✎');
+        ren.type = 'button';
+        ren.title = 'Rename attachment';
+        ren.addEventListener('click', function () {
+          m.attachRename = f.name;
+          renderRowAttachments();
+        });
+        row.appendChild(ren);
         var del = el('button', 'icon-btn danger', '✕');
         del.type = 'button';
         del.title = 'Delete attachment';
