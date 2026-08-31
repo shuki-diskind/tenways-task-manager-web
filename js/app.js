@@ -2249,10 +2249,14 @@
   function requestRender() {
     if (state.renderQueued) return;
     state.renderQueued = true;
-    window.requestAnimationFrame(function () {
+    var fire = function () {
       state.renderQueued = false;
       renderSheet();
-    });
+    };
+    // rAF pauses while the window is hidden/minimised — fall back to a
+    // timer there so changes still appear promptly
+    if (document.hidden) window.setTimeout(fire, 60);
+    else window.requestAnimationFrame(fire);
   }
 
   // Repaints a single row in place — the hot path for cell edits.
@@ -3089,6 +3093,32 @@
       applyCellSelection();
     }
     if (skipped) toast(skipped + ' cell(s) did not fit their column type.', 'warn', 4500);
+  }
+
+  // Delete/Backspace on a selection blanks every selected cell (auto
+  // numbers are skipped); one optimistic-lock update per touched row.
+  async function clearSelectedCells() {
+    if (!cellSel || !canEditCurrentTab()) return;
+    var rows = state.renderedRows || [];
+    var cols = visibleSheetCols();
+    var r1 = Math.min(cellSel.a.r, cellSel.b.r), r2 = Math.max(cellSel.a.r, cellSel.b.r);
+    var c1 = Math.min(cellSel.a.c, cellSel.b.c), c2 = Math.max(cellSel.a.c, cellSel.b.c);
+    var changes = new Map();
+    for (var r = r1; r <= r2 && r < rows.length; r++) {
+      for (var c = c1; c <= c2 && c < cols.length; c++) {
+        var col = cols[c];
+        if (col.kind === 'autonumber') continue;
+        var e2 = changes.get(r) || { row: rows[r], patch: {} };
+        e2.patch[col.key] = null;
+        changes.set(r, e2);
+      }
+    }
+    if (changes.size === 0) return;
+    var ok = await applyCellChanges(Array.from(changes.values()));
+    if (ok) {
+      flashSelection = true;
+      applyCellSelection();
+    }
   }
 
   // ---------- empty rows (right-click the row number) ----------
@@ -4092,6 +4122,39 @@
       if (!cellSel) return;
       e.preventDefault();
       pasteIntoSelectedCell(e.clipboardData.getData('text/plain'));
+    });
+    // Excel keyboard feel: with a cell selected, typing starts editing it
+    // (replacing its content) and Delete/Backspace clears the selection.
+    document.addEventListener('keydown', function (e) {
+      if (!cellSel || isPhone()) return;
+      var el2 = document.activeElement;
+      if (el2 && (el2.tagName === 'INPUT' || el2.tagName === 'TEXTAREA' || el2.tagName === 'SELECT')) return;
+      if (rowModal || state.modal || linkModal || tabModal.open || catModal.open || adminModal.open) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (!canEditCurrentTab()) return;
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        e.preventDefault();
+        clearSelectedCells();
+        return;
+      }
+      if (e.key.length !== 1) return;   // only printable characters start editing
+      var rows2 = state.renderedRows || [];
+      var cols2 = visibleSheetCols();
+      var row2 = rows2[cellSel.a.r];
+      var col2 = cols2[cellSel.a.c];
+      if (!row2 || !col2) return;
+      if (col2.kind === 'autonumber' || col2.kind === 'checkbox') return;
+      var tr2 = $('sheet-body').children[cellSel.a.r];
+      var td2 = tr2 && tr2.children[cellSel.a.c + 1];
+      if (!td2) return;
+      e.preventDefault();
+      startInlineEdit(td2, row2, col2);
+      var ed2 = document.querySelector('.cell-editor');
+      if (ed2 && (col2.kind === 'text' || col2.kind === 'textarea' ||
+                  col2.kind === 'number' || col2.kind === 'uniquenumber')) {
+        ed2.value = e.key;   // typing replaces the old content, Excel-style
+        try { ed2.setSelectionRange(ed2.value.length, ed2.value.length); } catch (err) { /* number inputs */ }
+      }
     });
     var scrollSaveTimer = null;
     function scheduleScrollSave() {
