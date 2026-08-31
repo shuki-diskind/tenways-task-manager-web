@@ -1997,6 +1997,17 @@
     });
     table.insertBefore(cg, table.firstChild);
 
+    // Fixed layout plus an explicit pixel width: the table tracks the column
+    // sum exactly, so shrinking a column genuinely shrinks it on screen
+    // (with width:max-content Chrome quietly hands freed space back).
+    if (!isPhone()) {
+      var totalW = 54;
+      cols.forEach(function (c) { totalW += colWidth(c); });
+      table.style.width = totalW + 'px';
+    } else {
+      table.style.width = '';
+    }
+
     var hr = el('tr');
     hr.appendChild(el('th', 'sheet-gutter', ''));
     cols.forEach(function (c, i) {
@@ -2090,25 +2101,19 @@
     if (!colEl) return;
     var startX = ev.clientX;
     var startW = parseInt(colEl.style.width, 10) || colWidth(col);
+    var startTableW = parseInt(table.style.width, 10) || table.getBoundingClientRect().width;
     document.body.classList.add('col-resizing');
 
     // A column can be dragged no narrower than its header text (capped at
     // 20 characters), so the header never gets swallowed.
-    var minW = 56;
-    var th = table.querySelectorAll('#sheet-head th')[index + 1];
-    if (th) {
-      var cs = window.getComputedStyle(th);
-      var canvas = startColumnResize._c || (startColumnResize._c = document.createElement('canvas'));
-      var ctx = canvas.getContext('2d');
-      ctx.font = cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily;
-      var label = col.name.length > 20 ? col.name.slice(0, 20) : col.name;
-      if (cs.textTransform === 'uppercase') label = label.toUpperCase();
-      minW = Math.max(40, Math.ceil(ctx.measureText(label).width * 1.04) + 18);
-    }
+    // Shrink as far as you like - header and cells clip with an ellipsis,
+    // and hovering a cell still shows its full text.
+    var minW = 36;
 
     function onMove(e) {
       var w = Math.max(minW, startW + (e.clientX - startX));
       colEl.style.width = w + 'px';
+      table.style.width = (startTableW + (w - startW)) + 'px';
     }
     function onUp() {
       document.removeEventListener('mousemove', onMove);

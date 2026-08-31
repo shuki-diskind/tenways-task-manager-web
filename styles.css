@@ -727,7 +727,7 @@ tbody tr:hover td { background: var(--row-hover); }
   #sheet-body td.sheet-first { font-weight: 700; font-size: 15px; }
   #sheet-body td.sheet-first::before { display: none; }
   /* cards, not a grid: undo the spreadsheet sizing */
-  #sheet-table { table-layout: auto; width: 100%; font-size: 14px; }
+  #sheet-table { table-layout: auto; width: 100% !important; font-size: 14px; }
   #sheet-table colgroup { display: none; }
   .sheet-gutter { display: none !important; }
   .col-resizer { display: none; }
@@ -754,7 +754,6 @@ tbody tr:hover td { background: var(--row-hover); }
 #sheet-table {
   table-layout: fixed;          /* column widths come from <colgroup> */
   width: max-content;
-  min-width: 100%;
   border-collapse: separate;
   border-spacing: 0;
   font-size: 12.5px;
@@ -884,3 +883,6 @@ th.sheet-gutter { z-index: 3; }
 /* the "Columns" display filter */
 .colvis { position: relative; display: inline-block; }
 .colvis .msel-panel { max-height: 320px; overflow-y: auto; }
+
+/* the Columns panel opens leftward from the right edge */
+.colvis .msel-panel { left: auto; right: 0; }
