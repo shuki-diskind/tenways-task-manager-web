@@ -1988,7 +1988,7 @@
     if (old) old.remove();
     var cg = document.createElement('colgroup');
     var gcol = document.createElement('col');
-    gcol.style.width = '54px';
+    gcol.style.width = '64px';
     cg.appendChild(gcol);
     cols.forEach(function (c) {
       var col = document.createElement('col');
@@ -2001,7 +2001,7 @@
     // sum exactly, so shrinking a column genuinely shrinks it on screen
     // (with width:max-content Chrome quietly hands freed space back).
     if (!isPhone()) {
-      var totalW = 54;
+      var totalW = 64;
       cols.forEach(function (c) { totalW += colWidth(c); });
       table.style.width = totalW + 'px';
     } else {
@@ -2030,7 +2030,17 @@
       var status = row.data ? String(row.data.status || '').toLowerCase() : '';
       var tint = (status === 'green' || status === 'yellow' || status === 'red') ? ' st-' + status : '';
       var tr = el('tr', 'sheet-row-open' + tint);
-      tr.appendChild(el('td', 'sheet-gutter', String((row.position || 0) + 1)));
+      var gutter = el('td', 'sheet-gutter');
+      var openBtn = el('button', 'row-open-btn', '\u270E');
+      openBtn.type = 'button';
+      openBtn.title = 'Open this row';
+      openBtn.addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        openRowModal('edit', row);
+      });
+      gutter.appendChild(openBtn);
+      gutter.appendChild(el('span', null, String((row.position || 0) + 1)));
+      tr.appendChild(gutter);
       cols.forEach(function (c, i) {
         var text = sheetValue(row, c);
         var link = cellLink(row, c);
@@ -2054,9 +2064,15 @@
         if (c.kind === 'text' || c.kind === 'textarea') {
           td.addEventListener('contextmenu', function (ev) { openCellMenu(ev, row, c); });
         }
+        td.addEventListener('dblclick', function (ev) {
+          ev.preventDefault();
+          if (!isPhone()) startInlineEdit(td, row, c);
+        });
         tr.appendChild(td);
       });
-      tr.addEventListener('click', function () { openRowModal('edit', row); });
+      // Phones open the card editor on tap; on desktop the pencil in the
+      // gutter opens it, leaving clicks free for in-place editing.
+      tr.addEventListener('click', function () { if (isPhone()) openRowModal('edit', row); });
       return tr;
     }
 
@@ -2198,6 +2214,107 @@
     });
   }
 
+  // ---------- in-place cell editing (double-click, like Excel) ----------
+
+  function startInlineEdit(td, row, col) {
+    if (!canEditCurrentTab()) return;
+    if (col.kind === 'autonumber') {
+      toast('Auto numbers are assigned automatically.', 'warn', 3500);
+      return;
+    }
+    if (col.kind === 'checkbox') {
+      var cur = row.data ? row.data[col.key] : null;
+      commitInlineValue(row, col, !(cur === true || cur === 'true'));
+      return;
+    }
+    var v = row.data ? row.data[col.key] : null;
+    td.classList.add('editing');
+    td.replaceChildren();
+    var input;
+    if (col.kind === 'picklist') {
+      input = document.createElement('select');
+      var blank = el('option', null, '—');
+      blank.value = '';
+      input.appendChild(blank);
+      (col.options || []).forEach(function (o) {
+        var opt = el('option', null, o);
+        opt.value = o;
+        input.appendChild(opt);
+      });
+      if (v && (col.options || []).indexOf(String(v)) < 0) {
+        var extra = el('option', null, String(v));
+        extra.value = String(v);
+        input.appendChild(extra);
+      }
+      input.value = v == null ? '' : String(v);
+    } else if (col.kind === 'textarea') {
+      input = document.createElement('textarea');
+      input.rows = Math.min(5, Math.max(2, String(v == null ? '' : v).split('\n').length));
+      input.value = v == null ? '' : String(v);
+    } else {
+      input = document.createElement('input');
+      input.type = col.kind === 'number' ? 'number' : (col.kind === 'date' ? 'date' : 'text');
+      input.value = v == null ? '' : (col.kind === 'date' ? String(v).slice(0, 10) : String(v));
+    }
+    input.className = 'cell-editor';
+    td.appendChild(input);
+    input.focus();
+    if (input.select) { try { input.select(); } catch (e) { /* selects nothing */ } }
+
+    var done = false;
+    function commit() {
+      if (done) return;
+      done = true;
+      var val = input.value;
+      var newVal = val === '' ? null : (col.kind === 'number' ? Number(val) : val);
+      var oldVal = v == null ? '' : String(v);
+      if (String(newVal == null ? '' : newVal) === oldVal) { renderSheet(); return; }
+      commitInlineValue(row, col, newVal);
+    }
+    function cancel() {
+      if (done) return;
+      done = true;
+      renderSheet();
+    }
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') {
+        if (col.kind === 'textarea' && e.shiftKey) return;  // Shift+Enter = new line
+        e.preventDefault();
+        commit();
+      } else if (e.key === 'Escape') {
+        e.stopPropagation();
+        cancel();
+      }
+    });
+    input.addEventListener('blur', commit);
+    if (col.kind === 'picklist') input.addEventListener('change', commit);
+    input.addEventListener('click', function (e) { e.stopPropagation(); });
+    input.addEventListener('dblclick', function (e) { e.stopPropagation(); });
+  }
+
+  // One cell changes; every other key in the row's data stays untouched,
+  // with the usual "someone else saved first" protection.
+  async function commitInlineValue(row, col, newVal) {
+    var cur = state.sheetRows.find(function (r) { return r.id === row.id; }) || row;
+    var data = Object.assign({}, cur.data || {});
+    data[col.key] = newVal;
+    var upd = await sb.from('sheet_rows').update({ data: data })
+      .eq('id', cur.id).eq('version', cur.version).select(SHEET_ROW_SELECT);
+    if (upd.error) {
+      toast('Could not save: ' + upd.error.message, 'error', 6000);
+      renderSheet();
+      return;
+    }
+    if (!upd.data || upd.data.length === 0) {
+      toast('This row was just changed by someone else — reloading.', 'warn', 5000);
+      await loadSheetRows(true);
+      return;
+    }
+    var i = state.sheetRows.findIndex(function (r) { return r.id === cur.id; });
+    if (i >= 0) state.sheetRows[i] = upd.data[0];
+    renderSheet();
+  }
+
   // ---------- cell links (right-click a text cell) ----------
 
   var linkModal = null;   // { rowId, colKey, colName }
@@ -2237,6 +2354,7 @@
   function openCellMenu(ev, row, col) {
     ev.preventDefault();
     ev.stopPropagation();
+    var td = ev.currentTarget;
     var link = cellLink(row, col);
     var canEdit = canEditCurrentTab();
     if (!link && !canEdit) return;
@@ -2246,6 +2364,7 @@
       window.open(link, '_blank', 'noopener');
     }));
     if (canEdit) {
+      m.appendChild(menuItem('Edit cell…', function () { startInlineEdit(td, row, col); }));
       m.appendChild(menuItem(link ? 'Edit link…' : 'Add link…', function () {
         openLinkModal(row, col);
       }));
