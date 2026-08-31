@@ -917,3 +917,15 @@ th.sheet-gutter { z-index: 3; }
 
 /* the Columns panel opens leftward from the right edge */
 .colvis .msel-panel { left: auto; right: 0; }
+
+/* row editor fields grow with their content, like the record form */
+#row-fields .grow-field {
+  resize: none;
+  overflow-y: hidden;
+  line-height: 1.45;
+  min-height: 78px;
+}
+#row-fields .grow-single { min-height: 38px; }
+@media (max-width: 720px) {
+  #row-fields .grow-single { min-height: 42px; }
+}

@@ -2539,7 +2539,9 @@
       if (c.kind === 'textarea') {
         input = document.createElement('textarea');
         input.rows = 3;
+        input.className = 'grow-field';
         input.value = v == null ? '' : String(v);
+        input.addEventListener('input', function () { autoGrow(input); });
       } else if (c.kind === 'checkbox') {
         input = document.createElement('input');
         input.type = 'checkbox';
@@ -2567,10 +2569,29 @@
         input.type = 'text';
         input.readOnly = true;
         input.value = v == null ? '(assigned automatically)' : String(v);
-      } else {
+      } else if (c.kind === 'number' || c.kind === 'date') {
         input = document.createElement('input');
-        input.type = c.kind === 'number' ? 'number' : (c.kind === 'date' ? 'date' : 'text');
+        input.type = c.kind;
         input.value = v == null ? '' : (c.kind === 'date' ? String(v).slice(0, 10) : String(v));
+      } else {
+        // free-text cells wrap and grow with their content like the record
+        // form's Title: still one logical line (pasted breaks flatten),
+        // and Enter still saves the row
+        input = document.createElement('textarea');
+        input.rows = 1;
+        input.className = 'grow-field grow-single';
+        input.value = v == null ? '' : String(v);
+        input.addEventListener('input', function () {
+          if (input.value.indexOf('\n') >= 0 || input.value.indexOf('\r') >= 0) {
+            var pos = input.selectionStart;
+            input.value = input.value.split(/\r\n|\r|\n/).join(' ');
+            input.setSelectionRange(pos, pos);
+          }
+          autoGrow(input);
+        });
+        input.addEventListener('keydown', function (e) {
+          if (e.key === 'Enter') { e.preventDefault(); $('btn-row-save').click(); }
+        });
       }
       input.id = rowFieldId(c);
       lab.appendChild(input);
@@ -2610,6 +2631,10 @@
       if (c.kind === 'checkbox') { data[c.key] = !!input.checked; return; }
       if (c.kind === 'autonumber') return;   // already in the clone; the db assigns new ones
       var val = input.value;
+      if (c.kind !== 'textarea' && c.kind !== 'number' && c.kind !== 'date' &&
+          typeof val === 'string' && /[\r\n]/.test(val)) {
+        val = val.split(/\r\n|\r|\n/).join(' ');
+      }
       data[c.key] = val === '' ? null : (c.kind === 'number' ? Number(val) : val);
       if (c.kind === 'text' || c.kind === 'textarea') {
         var li = $(rowFieldId(c) + '-link');
@@ -2658,6 +2683,7 @@
       $('row-meta').textContent += ' · view only';
     }
     $('row-backdrop').classList.remove('hidden');
+    $('row-fields').querySelectorAll('.grow-field').forEach(function (f) { autoGrow(f); });
   }
 
   function closeRowModal() {
