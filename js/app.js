@@ -2183,7 +2183,7 @@
           td.appendChild(a);
           td.title = (text ? text + '\n' : '') + link;
         } else {
-          td.textContent = text || '—';
+          td.textContent = text;
           if (text) td.title = text;    // full value on hover, since cells clip
         }
         td.setAttribute('data-label', c.name);
@@ -2217,7 +2217,14 @@
     (function chunk() {
       if (token !== state.renderToken) return;   // a newer render took over
       var frag = document.createDocumentFragment();
-      for (var k = 0; k < 500 && i < rows.length; k++, i++) frag.appendChild(buildTr(rows[i], i));
+      for (var k = 0; k < 500 && i < rows.length; k++, i++) {
+        try {
+          frag.appendChild(buildTr(rows[i], i));
+        } catch (err) {
+          // one broken row must never blank the whole sheet
+          console.log('[app] row render failed at ' + i + ': ' + err.message);
+        }
+      }
       body.appendChild(frag);
       if (i < rows.length) window.requestAnimationFrame(chunk);
       else {
@@ -3363,7 +3370,10 @@
         cancel();
       }
     });
-    input.addEventListener('blur', commit);
+    input.addEventListener('blur', function () {
+      if (!input.isConnected) { done = true; return; }
+      commit();
+    });
     if (col.kind === 'picklist') input.addEventListener('change', commit);
     input.addEventListener('click', function (e) { e.stopPropagation(); });
     input.addEventListener('dblclick', function (e) { e.stopPropagation(); });

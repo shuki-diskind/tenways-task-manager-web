@@ -987,3 +987,8 @@ th.sheet-gutter { z-index: 3; }
 @media (max-width: 720px) {
   #row-fields .grow-single { min-height: 42px; }
 }
+
+/* phone cards show only the fields that have something in them */
+@media (max-width: 720px) {
+  #sheet-body td.empty-cell { display: none; }
+}
