@@ -6,16 +6,16 @@
         content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src https: wss:; base-uri 'none'; form-action 'none'" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#4f46e5" />
-  <link rel="manifest" href="manifest.webmanifest?v=1.11.9" />
+  <link rel="manifest" href="manifest.webmanifest?v=1.11.10" />
   <link rel="icon" href="icons/icon-192.png" />
   <link rel="apple-touch-icon" href="icons/icon-180.png" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="TENWAYS Tasks" />
-  <meta name="app-version" content="1.11.9" />
+  <meta name="app-version" content="1.11.10" />
   <title>TENWAYS Task Manager</title>
-  <link rel="stylesheet" href="styles.css?v=1.11.9" />
+  <link rel="stylesheet" href="styles.css?v=1.11.10" />
 </head>
 <body>
 
@@ -145,6 +145,10 @@
         <div class="toolbar">
           <button class="btn primary" id="btn-new-row">&#65291; New row</button>
           <input type="search" id="sheet-search" placeholder="Search this sheet&hellip;" />
+          <div class="colvis searchcols">
+            <button class="btn ghost" id="btn-searchcols" title="Choose which columns the search looks in">All columns</button>
+            <div id="searchcols-panel" class="msel-panel hidden"></div>
+          </div>
           <div class="colvis">
             <button class="btn ghost" id="btn-colvis" title="Choose which columns are displayed">Columns</button>
             <div id="colvis-panel" class="msel-panel hidden"></div>
@@ -155,6 +159,13 @@
           </select>
           <button class="btn ghost btn-small" id="btn-goto-top" title="Jump to the top of the sheet">&#10514; Top</button>
           <button class="btn ghost btn-small" id="btn-goto-end" title="Jump to the end of the sheet">&#10515; End</button>
+        </div>
+        <div id="sheet-search-bar" class="search-bar hidden">
+          <span id="search-summary" class="muted small"></span>
+          <span class="spacer"></span>
+          <button class="btn ghost btn-small" id="btn-hit-prev" title="Previous result (Shift+Enter)">&#8249; Prev</button>
+          <span id="search-pos" class="muted small"></span>
+          <button class="btn ghost btn-small" id="btn-hit-next" title="Next result (Enter)">Next &#8250;</button>
         </div>
         <div class="table-wrap">
           <table id="sheet-table">
@@ -454,10 +465,10 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="vendor/supabase.js?v=1.11.9"></script>
-  <script src="config.js?v=1.11.9"></script>
-  <script src="js/client.js?v=1.11.9"></script>
-  <script src="js/app.js?v=1.11.9"></script>
-  <script src="js/auth.js?v=1.11.9"></script>
+  <script src="vendor/supabase.js?v=1.11.10"></script>
+  <script src="config.js?v=1.11.10"></script>
+  <script src="js/client.js?v=1.11.10"></script>
+  <script src="js/app.js?v=1.11.10"></script>
+  <script src="js/auth.js?v=1.11.10"></script>
 </body>
 </html>

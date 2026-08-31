@@ -105,6 +105,9 @@
     colAutoWidths: {},  // measured default widths for the current sheet
     hiddenCols: new Set(), // column keys hidden by the "Columns" filter
     sortDir: 'desc',    // 'desc' = newest first, 'asc' = oldest first
+    searchCols: null,   // null = search all columns; otherwise a Set of keys
+    hits: [],           // matched cells of the current render, in display order
+    hitIndex: 0,        // which hit prev/next is standing on
     flashRowId: null,   // row to flash after a paste/move
     renderedRows: [],   // the rows renderSheet last displayed, in order
     restorePending: false, // restore the saved scroll spot after next render
@@ -268,18 +271,24 @@
   async function loadSheetRows(reset) {
     var tab = currentTab();
     if (!tab || tab.kind !== 'sheet') return;
+    // Rapid consecutive searches (typing, scope clicks) must not interleave:
+    // any response belonging to an older request is thrown away.
+    var seq = state.loadSeq = (state.loadSeq || 0) + 1;
     var q = $('sheet-search').value.trim();
     if (reset) {
       state.sheetRows = [];
       state.sheetQuery = q;
       state.fullSheet = false;
       state.colAutoWidths = {};   // default widths re-derive from the first page
-      var c = await sb.rpc('count_sheet_rows', { p_tab: tab.id, p_q: q });
+      var c = await sb.rpc('count_sheet_rows', { p_tab: tab.id, p_q: q, p_cols: searchColsParam() });
+      if (state.loadSeq !== seq) return;
       state.sheetTotal = c.error ? 0 : Number(c.data);
     }
     var res = await sb.rpc('search_sheet_rows', {
       p_tab: tab.id, p_q: q, p_limit: SHEET_PAGE, p_offset: state.sheetRows.length,
+      p_cols: searchColsParam(),
     });
+    if (state.loadSeq !== seq) return;   // superseded by a newer search
     if (res.error) {
       toast('Could not load rows: ' + res.error.message, 'error', 6000);
       return;
@@ -301,6 +310,7 @@
   var sheetSearchTimer = null;
   function onSheetSearch() {
     clearTimeout(sheetSearchTimer);
+    state.hitIndex = 0;
     if (state.fullSheet) {
       state.sheetQuery = $('sheet-search').value.trim();
       renderSheet();
@@ -311,6 +321,7 @@
 
   function rowMatchesQuery(row, q) {
     return state.sheetCols.some(function (c) {
+      if (!searchColActive(c)) return false;
       if (sheetValue(row, c).toLowerCase().indexOf(q) >= 0) return true;
       var l = cellLink(row, c);
       return !!(l && l.toLowerCase().indexOf(q) >= 0);
@@ -339,6 +350,10 @@
         state.sheetCols = await fetchSheetColumns(tab.id);
         state.colWidths = loadColWidths();
         state.hiddenCols = loadHiddenCols();
+        state.searchCols = null;
+        state.hits = [];
+        state.hitIndex = 0;
+        $('btn-searchcols').textContent = 'All columns';
         state.sortDir = loadSortDir();
         $('sheet-sortdir').value = state.sortDir;
         state.colAutoWidths = {};
@@ -2072,6 +2087,7 @@
       rows = rows.filter(function (r) { return rowMatchesQuery(r, q); });
     }
     state.renderedRows = rows;
+    state.hits = [];
     var head = $('sheet-head');
     var body = $('sheet-body');
 
@@ -2171,6 +2187,14 @@
           if (text) td.title = text;    // full value on hover, since cells clip
         }
         td.setAttribute('data-label', c.name);
+        if (state.sheetQuery && searchColActive(c)) {
+          var q0 = state.sheetQuery.toLowerCase();
+          if ((text && text.toLowerCase().indexOf(q0) >= 0) ||
+              (link && link.toLowerCase().indexOf(q0) >= 0)) {
+            td.classList.add('cell-hit');
+            state.hits.push({ r: index, c: i, colName: c.name });
+          }
+        }
         td.addEventListener('contextmenu', function (ev) { openCellMenu(ev, row, c, index, i); });
         td.addEventListener('mousedown', function (ev) { cellMouseDown(ev, index, i); });
         td.addEventListener('mouseover', function () { cellMouseOver(index, i); });
@@ -2196,7 +2220,10 @@
       for (var k = 0; k < 500 && i < rows.length; k++, i++) frag.appendChild(buildTr(rows[i], i));
       body.appendChild(frag);
       if (i < rows.length) window.requestAnimationFrame(chunk);
-      else applyCellSelection();
+      else {
+        applyCellSelection();
+        updateSearchBar();
+      }
     })();
 
     var total = state.sheetTotal;
@@ -2449,6 +2476,127 @@
     }
     toast('Attachment deleted', 'ok');
     rowLoadAttachments();
+  }
+
+  // ---------- smart search: column scope, hit list, navigation ----------
+
+  function searchColActive(col) {
+    return !state.searchCols || state.searchCols.has(col.key);
+  }
+
+  function searchColsParam() {
+    return state.searchCols ? Array.from(state.searchCols) : null;
+  }
+
+  function searchScopeLabel() {
+    if (!state.searchCols) return 'All columns';
+    if (state.searchCols.size === 0) return 'No columns';
+    return state.searchCols.size + (state.searchCols.size === 1 ? ' column' : ' columns');
+  }
+
+  function closeSearchColsPanel() {
+    var p = $('searchcols-panel');
+    if (p.classList.contains('hidden')) return false;
+    p.classList.add('hidden');
+    return true;
+  }
+
+  function rerunSearch() {
+    $('btn-searchcols').textContent = searchScopeLabel();
+    state.hitIndex = 0;
+    if (!state.sheetQuery) { renderSheet(); return; }
+    if (state.fullSheet) renderSheet(); else loadSheetRows(true);
+  }
+
+  function buildSearchColsPanel() {
+    var p = $('searchcols-panel');
+    p.replaceChildren();
+    var all = el('label', 'msel-row msel-everyone');
+    var allCb = document.createElement('input');
+    allCb.type = 'checkbox';
+    allCb.checked = !state.searchCols;
+    allCb.addEventListener('change', function () {
+      state.searchCols = allCb.checked ? null : new Set();
+      buildSearchColsPanel();
+      rerunSearch();
+    });
+    all.appendChild(allCb);
+    all.appendChild(el('span', null, 'Search all columns'));
+    p.appendChild(all);
+    state.sheetCols.forEach(function (c) {
+      var row = el('label', 'msel-row');
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = searchColActive(c);
+      cb.addEventListener('change', function () {
+        if (!state.searchCols) {
+          // leaving "all": start from every column, then apply this untick
+          state.searchCols = new Set(state.sheetCols.map(function (x) { return x.key; }));
+        }
+        if (cb.checked) state.searchCols.add(c.key); else state.searchCols.delete(c.key);
+        if (state.searchCols.size === state.sheetCols.length) state.searchCols = null;
+        buildSearchColsPanel();
+        rerunSearch();
+      });
+      row.appendChild(cb);
+      row.appendChild(el('span', null, c.name));
+      p.appendChild(row);
+    });
+  }
+
+  function toggleSearchColsPanel() {
+    var p = $('searchcols-panel');
+    if (!p.classList.contains('hidden')) { p.classList.add('hidden'); return; }
+    buildSearchColsPanel();
+    p.classList.remove('hidden');
+  }
+
+  function updateSearchBar() {
+    var bar = $('sheet-search-bar');
+    if (!state.sheetQuery) { bar.classList.add('hidden'); return; }
+    var hits = state.hits;
+    if (state.hitIndex >= hits.length) state.hitIndex = 0;
+    var rowSet = {};
+    var perCol = {};
+    hits.forEach(function (h) {
+      rowSet[h.r] = true;
+      perCol[h.colName] = (perCol[h.colName] || 0) + 1;
+    });
+    var rowsWith = Object.keys(rowSet).length;
+    var colBits = Object.keys(perCol).map(function (nm) { return { nm: nm, n: perCol[nm] }; })
+      .sort(function (a, b) { return b.n - a.n; });
+    var shown = colBits.slice(0, 4).map(function (b) { return b.nm + ': ' + b.n; });
+    if (colBits.length > 4) shown.push('+' + (colBits.length - 4) + ' more columns');
+    $('search-summary').textContent = hits.length === 0
+      ? 'No matching cells in the loaded rows'
+      : hits.length + (hits.length === 1 ? ' hit' : ' hits') + ' in ' + rowsWith +
+        ' loaded row' + (rowsWith === 1 ? '' : 's') + '   ·   ' + shown.join('   ·   ');
+    $('search-pos').textContent = hits.length ? (state.hitIndex + 1) + ' / ' + hits.length : '0 / 0';
+    $('btn-hit-prev').disabled = hits.length === 0;
+    $('btn-hit-next').disabled = hits.length === 0;
+    bar.classList.remove('hidden');
+    markCurrentHit(false);
+  }
+
+  function markCurrentHit(scroll) {
+    document.querySelectorAll('#sheet-body td.cell-hit-current').forEach(function (td) {
+      td.classList.remove('cell-hit-current');
+    });
+    var h = state.hits[state.hitIndex];
+    if (!h) return;
+    var tr = $('sheet-body').children[h.r];
+    var td = tr && tr.children[h.c + 1];
+    if (!td) return;
+    td.classList.add('cell-hit-current');
+    if (scroll) td.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
+  }
+
+  function goToHit(delta) {
+    var count = state.hits.length;
+    if (!count) return;
+    state.hitIndex = ((state.hitIndex + delta) % count + count) % count;
+    $('search-pos').textContent = (state.hitIndex + 1) + ' / ' + count;
+    markCurrentHit(true);
   }
 
   // ---------- Excel-style cell selection + copy / single-cell paste ----------
@@ -3657,6 +3805,7 @@
       if (e.key === 'Escape') {
         if (closeCellMenu()) return;               // Escape closes the cell menu first
         if (closeColVisPanel()) return;            // then the columns filter
+        if (closeSearchColsPanel()) return;        // then the search scope
         if (closeAllPanels()) return;              // then an open dropdown
         if (linkModal) { closeLinkModal(); return; }
         if (!$('multirow-backdrop').classList.contains('hidden')) { closeMultiRowModal(); return; }
@@ -3783,6 +3932,7 @@
     document.addEventListener('mousedown', function (e) {
       if (!e.target.closest || !e.target.closest('#cell-menu')) closeCellMenu();
       if (!e.target.closest || !e.target.closest('.colvis')) closeColVisPanel();
+      if (!e.target.closest || !e.target.closest('.searchcols')) closeSearchColsPanel();
     });
     document.addEventListener('mouseup', function () { cellDragging = false; });
     document.addEventListener('copy', function (e) {
@@ -3835,6 +3985,12 @@
     window.addEventListener('scroll', scheduleScrollSave);
     window.addEventListener('beforeunload', saveScrollState);
     $('btn-colvis').addEventListener('click', toggleColVisPanel);
+    $('btn-searchcols').addEventListener('click', toggleSearchColsPanel);
+    $('btn-hit-prev').addEventListener('click', function () { goToHit(-1); });
+    $('btn-hit-next').addEventListener('click', function () { goToHit(1); });
+    $('sheet-search').addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); goToHit(e.shiftKey ? -1 : 1); }
+    });
     document.addEventListener('scroll', function () { closeCellMenu(); }, true);
     $('row-form').addEventListener('submit', saveRow);
     $('btn-row-cancel').addEventListener('click', closeRowModal);
