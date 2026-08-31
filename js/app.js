@@ -104,6 +104,8 @@
     colWidths: {},      // per-tab column widths, remembered in this browser
     colAutoWidths: {},  // measured default widths for the current sheet
     hiddenCols: new Set(), // column keys hidden by the "Columns" filter
+    renderedRows: [],   // the rows renderSheet last displayed, in order
+    restorePending: false, // restore the saved scroll spot after next render
     fullSheet: false,   // desktop: every row of the sheet is in memory
     renderToken: 0,     // cancels a chunked render superseded by a newer one
     channel: null,
@@ -346,6 +348,10 @@
       if (catModal.open && !catModal.editingId) renderCatModal();
       if (adminModal.open && !adminModal.pwEditId && !adminModal.nameEditId) renderAdminUsers();
       render();
+      if (state.restorePending) {
+        state.restorePending = false;
+        restoreScrollState();
+      }
     } catch (err) {
       console.log('[app] reload failed: ' + err.message);
       if (showErrors) toast('Could not load records: ' + err.message, 'error', 6000);
@@ -1629,6 +1635,7 @@
     $('me-label').textContent = meta.display_name || user.email;
     $('count-label').textContent = 'Loading…';
     console.log('[app] started for ' + user.email);
+    state.restorePending = true;     // reopen where the app was closed
     await reload(true);
     connectRealtime();
     clearInterval(state.clockTimer);
@@ -1686,6 +1693,8 @@
 
   function switchTab(id) {
     if (id === state.currentTabId) return;
+    saveScrollState();               // remember the spot on the tab we leave
+    state.restorePending = true;     // and restore the one we arrive at
     state.currentTabId = id;
     try { window.localStorage.setItem('tenways.tab', id); } catch (e) { /* private mode */ }
     $('search-box').value = '';
@@ -2048,6 +2057,7 @@
       var q = state.sheetQuery.toLowerCase();
       rows = rows.filter(function (r) { return rowMatchesQuery(r, q); });
     }
+    state.renderedRows = rows;
     var head = $('sheet-head');
     var body = $('sheet-body');
 
@@ -2106,7 +2116,7 @@
     });
     head.replaceChildren(hr);
 
-    function buildTr(row) {
+    function buildTr(row, index) {
       var status = row.data ? String(row.data.status || '').toLowerCase() : '';
       var tint = (status === 'green' || status === 'yellow' || status === 'red') ? ' st-' + status : '';
       var tr = el('tr', 'sheet-row-open' + tint);
@@ -2119,7 +2129,10 @@
         openRowModal('edit', row);
       });
       gutter.appendChild(openBtn);
-      gutter.appendChild(el('span', null, String((row.position || 0) + 1)));
+      gutter.appendChild(el('span', null, String(index + 1)));
+      gutter.title = 'Drag to move this row · right-click to insert rows';
+      gutter.addEventListener('contextmenu', function (ev) { openRowMenu(ev, row); });
+      gutter.addEventListener('mousedown', function (ev) { startRowDrag(ev, row); });
       tr.appendChild(gutter);
       cols.forEach(function (c, i) {
         var text = sheetValue(row, c);
@@ -2163,7 +2176,7 @@
     (function chunk() {
       if (token !== state.renderToken) return;   // a newer render took over
       var frag = document.createDocumentFragment();
-      for (var k = 0; k < 500 && i < rows.length; k++, i++) frag.appendChild(buildTr(rows[i]));
+      for (var k = 0; k < 500 && i < rows.length; k++, i++) frag.appendChild(buildTr(rows[i], i));
       body.appendChild(frag);
       if (i < rows.length) window.requestAnimationFrame(chunk);
     })();
@@ -2398,6 +2411,176 @@
     }
     toast('Attachment deleted', 'ok');
     rowLoadAttachments();
+  }
+
+  // ---------- empty rows (right-click the row number) ----------
+
+  function openRowMenu(ev, row) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (!canEditCurrentTab()) return;
+    var m = $('cell-menu');
+    m.replaceChildren();
+    m.appendChild(menuItem('＋ Add row above', function () { insertEmptyRowNear(row, 'above'); }));
+    m.appendChild(menuItem('＋ Add row below', function () { insertEmptyRowNear(row, 'below'); }));
+    m.classList.remove('hidden');
+    m.style.left = Math.max(4, Math.min(ev.clientX, window.innerWidth - m.offsetWidth - 8)) + 'px';
+    m.style.top = Math.max(4, Math.min(ev.clientY, window.innerHeight - m.offsetHeight - 8)) + 'px';
+  }
+
+  // Rows are ordered by a numeric position (newest first); inserting between
+  // two rows takes the midpoint, so nothing else has to move.
+  async function insertEmptyRowNear(row, where) {
+    if (state.sheetQuery) {
+      toast('Clear the search first — a new empty row would be hidden by it.', 'warn', 5000);
+      return;
+    }
+    var list = state.sheetRows;
+    var i = list.findIndex(function (r) { return r.id === row.id; });
+    if (i < 0) return;
+    var pos;
+    if (where === 'above') {
+      var higher = i > 0 ? list[i - 1] : null;
+      pos = higher ? (Number(row.position) + Number(higher.position)) / 2 : Number(row.position) + 1;
+    } else {
+      var lower = i < list.length - 1 ? list[i + 1] : null;
+      pos = lower ? (Number(row.position) + Number(lower.position)) / 2
+        : Number(row.position) - (list.length < state.sheetTotal ? 0.5 : 1);
+    }
+    var ins = await sb.from('sheet_rows')
+      .insert({ tab_id: state.currentTabId, position: pos, data: {} })
+      .select(SHEET_ROW_SELECT).single();
+    if (ins.error) {
+      toast('Could not add a row: ' + ins.error.message, 'error', 6000);
+      return;
+    }
+    state.sheetRows.splice(where === 'above' ? i : i + 1, 0, ins.data);
+    state.sheetTotal += 1;
+    renderSheet();
+    toast('Empty row added — double-click its cells to fill it in', 'ok', 4000);
+  }
+
+  // ---------- drag a row to a new position ----------
+
+  var rowDrag = null;
+
+  function startRowDrag(ev, row) {
+    if (isPhone() || !canEditCurrentTab()) return;
+    if (ev.button !== 0) return;
+    if (ev.target.closest && ev.target.closest('button')) return;  // the pencil
+    ev.preventDefault();
+    rowDrag = { row: row, startY: ev.clientY, active: false, dropIndex: -1 };
+    document.addEventListener('mousemove', onRowDragMove);
+    document.addEventListener('mouseup', onRowDragUp);
+  }
+
+  function onRowDragMove(e) {
+    if (!rowDrag) return;
+    if (!rowDrag.active) {
+      if (Math.abs(e.clientY - rowDrag.startY) < 5) return;
+      rowDrag.active = true;
+      document.body.classList.add('row-dragging');
+      rowDrag.indicator = el('div', 'row-drop-line', '');
+      document.body.appendChild(rowDrag.indicator);
+    }
+    var trs = document.querySelectorAll('#sheet-body tr');
+    var idx = trs.length;
+    for (var i = 0; i < trs.length; i++) {
+      var r = trs[i].getBoundingClientRect();
+      if (e.clientY < r.top + r.height / 2) { idx = i; break; }
+    }
+    rowDrag.dropIndex = idx;
+    var rect = idx < trs.length ? trs[idx].getBoundingClientRect() : null;
+    var lastRect = trs.length ? trs[trs.length - 1].getBoundingClientRect() : null;
+    var top = rect ? rect.top : (lastRect ? lastRect.bottom : e.clientY);
+    var ref = rect || lastRect;
+    rowDrag.indicator.style.top = (top - 1) + 'px';
+    if (ref) {
+      rowDrag.indicator.style.left = ref.left + 'px';
+      rowDrag.indicator.style.width = ref.width + 'px';
+    }
+  }
+
+  async function onRowDragUp() {
+    document.removeEventListener('mousemove', onRowDragMove);
+    document.removeEventListener('mouseup', onRowDragUp);
+    var d = rowDrag;
+    rowDrag = null;
+    if (!d || !d.active) return;
+    document.body.classList.remove('row-dragging');
+    if (d.indicator) d.indicator.remove();
+    var list = state.renderedRows || [];
+    var from = list.findIndex(function (r) { return r.id === d.row.id; });
+    var idx = d.dropIndex;
+    if (from < 0 || idx < 0 || idx === from || idx === from + 1) return;  // same spot
+    var above = idx > 0 ? list[idx - 1] : null;
+    var below = idx < list.length ? list[idx] : null;
+    var newPos;
+    if (!above) newPos = (below ? Number(below.position) : 0) + 1;
+    else if (!below) newPos = Number(above.position) -
+      (state.sheetRows.length < state.sheetTotal ? 0.5 : 1);
+    else newPos = (Number(above.position) + Number(below.position)) / 2;
+    var cur = state.sheetRows.find(function (r) { return r.id === d.row.id; });
+    if (!cur) return;
+    var upd = await sb.from('sheet_rows').update({ position: newPos })
+      .eq('id', cur.id).eq('version', cur.version).select(SHEET_ROW_SELECT);
+    if (upd.error) {
+      toast('Could not move the row: ' + upd.error.message, 'error', 6000);
+      return;
+    }
+    if (!upd.data || upd.data.length === 0) {
+      toast('This row was just changed by someone else — reloading.', 'warn', 5000);
+      await loadSheetRows(true);
+      return;
+    }
+    var i = state.sheetRows.findIndex(function (r) { return r.id === cur.id; });
+    if (i >= 0) state.sheetRows[i] = upd.data[0];
+    state.sheetRows.sort(function (a, b) { return (Number(b.position) || 0) - (Number(a.position) || 0); });
+    renderSheet();
+    toast('Row moved', 'ok');
+  }
+
+  // ---------- remember where you were (tab is already remembered) ----------
+
+  function scrollKey(tabId) { return 'tenways.scroll.' + tabId; }
+
+  function saveScrollState() {
+    var t = currentTab();
+    if (!t) return;
+    var payload;
+    if (t.kind === 'sheet') {
+      var w = document.querySelector('#sheet-view .table-wrap');
+      payload = { rows: state.sheetRows.length, y: w ? w.scrollTop : 0, x: w ? w.scrollLeft : 0 };
+    } else {
+      payload = { y: window.scrollY || 0 };
+    }
+    try { window.localStorage.setItem(scrollKey(t.id), JSON.stringify(payload)); } catch (e) { /* private mode */ }
+  }
+
+  function loadScrollState(tabId) {
+    try { return JSON.parse(window.localStorage.getItem(scrollKey(tabId)) || 'null'); }
+    catch (e) { return null; }
+  }
+
+  // Re-load as many pages as were open before, then jump back to the spot.
+  async function restoreScrollState() {
+    var t = currentTab();
+    if (!t) return;
+    var s = loadScrollState(t.id);
+    if (!s) return;
+    if (t.kind === 'sheet') {
+      var guard = 0;
+      var want = Math.min(Number(s.rows) || 0, state.sheetTotal);
+      while (state.sheetQuery === '' && state.sheetRows.length < want && guard++ < 60) {
+        await loadSheetRows(false);
+      }
+      window.setTimeout(function () {
+        var w = document.querySelector('#sheet-view .table-wrap');
+        if (w) { w.scrollTop = s.y || 0; w.scrollLeft = s.x || 0; }
+      }, 400);
+    } else {
+      window.setTimeout(function () { window.scrollTo(0, s.y || 0); }, 120);
+    }
   }
 
   // ---------- in-place cell editing (double-click, like Excel) ----------
@@ -2993,6 +3176,15 @@
       if (!e.target.closest || !e.target.closest('#cell-menu')) closeCellMenu();
       if (!e.target.closest || !e.target.closest('.colvis')) closeColVisPanel();
     });
+    var scrollSaveTimer = null;
+    function scheduleScrollSave() {
+      clearTimeout(scrollSaveTimer);
+      scrollSaveTimer = setTimeout(saveScrollState, 400);
+    }
+    var sheetWrap = document.querySelector('#sheet-view .table-wrap');
+    if (sheetWrap) sheetWrap.addEventListener('scroll', scheduleScrollSave);
+    window.addEventListener('scroll', scheduleScrollSave);
+    window.addEventListener('beforeunload', saveScrollState);
     $('btn-colvis').addEventListener('click', toggleColVisPanel);
     document.addEventListener('scroll', function () { closeCellMenu(); }, true);
     $('row-form').addEventListener('submit', saveRow);
