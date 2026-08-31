@@ -880,3 +880,7 @@ th.sheet-gutter { z-index: 3; }
 .row-link-input { margin-top: 4px; }
 .link-toggle { border: 0; background: none; cursor: pointer; padding: 0 4px; opacity: 0.5; font-size: 13px; }
 .link-toggle.on { opacity: 1; }
+
+/* the "Columns" display filter */
+.colvis { position: relative; display: inline-block; }
+.colvis .msel-panel { max-height: 320px; overflow-y: auto; }

@@ -45,7 +45,38 @@
 
   function colWidth(col) {
     var w = state.colWidths[col.key];
-    return (typeof w === 'number' && w > 40) ? w : defaultColWidth(col);
+    if (typeof w === 'number' && w > 40) return w;   // the user's remembered drag
+    if (state.colAutoWidths[col.key]) return state.colAutoWidths[col.key];
+    var auto = measureColWidth(col);
+    if (auto) { state.colAutoWidths[col.key] = auto; return auto; }
+    return defaultColWidth(col);
+  }
+
+  // Default width = wide enough for the header text and the loaded values,
+  // capped at ~100 characters. Hovering a cell always shows the full text.
+  function measureColWidth(col) {
+    var canvas = measureColWidth._c || (measureColWidth._c = document.createElement('canvas'));
+    var ctx = canvas.getContext('2d');
+    var family = window.getComputedStyle(document.body).fontFamily || 'sans-serif';
+    ctx.font = '11px ' + family;
+    var headerW = ctx.measureText(col.name.toUpperCase()).width * 1.04;
+    ctx.font = '12.5px ' + family;
+    var capPx = ctx.measureText('n'.repeat(100)).width;
+    var w = headerW;
+    var rows = state.sheetRows;
+    var count = Math.min(rows.length, 300);
+    for (var i = 0; i < count; i++) {
+      var t = sheetValue(rows[i], col);
+      if (!t) continue;
+      // multi-line values count by their longest line, and anything past the
+      // cap cannot matter
+      var line = t.split(/\r\n|\r|\n/).reduce(function (a, b) {
+        return b.length > a.length ? b : a;
+      }, '');
+      var mw = ctx.measureText(line.slice(0, 110)).width;
+      if (mw > w) w = mw;
+    }
+    return Math.ceil(Math.max(56, Math.min(Math.max(w, headerW), capPx))) + 18;
   }
 
   var SHEET_ROW_SELECT = [
@@ -71,6 +102,8 @@
     sheetTotal: 0,      // how many rows match on the server
     sheetQuery: '',     // the search the loaded rows belong to
     colWidths: {},      // per-tab column widths, remembered in this browser
+    colAutoWidths: {},  // measured default widths for the current sheet
+    hiddenCols: new Set(), // column keys hidden by the "Columns" filter
     fullSheet: false,   // desktop: every row of the sheet is in memory
     renderToken: 0,     // cancels a chunked render superseded by a newer one
     channel: null,
@@ -225,9 +258,9 @@
 
   // Sheets are read through RPCs so the database does the searching and
   // paging; they run as the caller, so tab visibility still applies.
-  // Phones page 200 rows at a time behind a "Load more" button; desktop pulls
-  // the whole sheet up front (1000 rows per request) so scrolling and search
-  // behave like a local spreadsheet.
+  // Every device pages 200 rows at a time behind the "Load more" button.
+  // If someone does page all the way through, search switches to instant
+  // on-device filtering automatically.
   async function loadSheetRows(reset) {
     var tab = currentTab();
     if (!tab || tab.kind !== 'sheet') return;
@@ -236,28 +269,18 @@
       state.sheetRows = [];
       state.sheetQuery = q;
       state.fullSheet = false;
+      state.colAutoWidths = {};   // default widths re-derive from the first page
       var c = await sb.rpc('count_sheet_rows', { p_tab: tab.id, p_q: q });
       state.sheetTotal = c.error ? 0 : Number(c.data);
     }
-    var page = isPhone() ? SHEET_PAGE : 1000;
-    var res;
-    do {
-      res = await sb.rpc('search_sheet_rows', {
-        p_tab: tab.id, p_q: q, p_limit: page, p_offset: state.sheetRows.length,
-      });
-      if (res.error) {
-        toast('Could not load rows: ' + res.error.message, 'error', 6000);
-        return;
-      }
-      state.sheetRows = state.sheetRows.concat(res.data || []);
-      if (!isPhone() && state.sheetRows.length < state.sheetTotal) {
-        $('count-label').textContent = 'Loading ' +
-          state.sheetRows.length.toLocaleString() + ' / ' +
-          state.sheetTotal.toLocaleString() + ' rows…';
-      }
-    } while (!isPhone() && state.sheetRows.length < state.sheetTotal &&
-             (res.data || []).length > 0);
-    // With everything in memory, search runs instantly on-device.
+    var res = await sb.rpc('search_sheet_rows', {
+      p_tab: tab.id, p_q: q, p_limit: SHEET_PAGE, p_offset: state.sheetRows.length,
+    });
+    if (res.error) {
+      toast('Could not load rows: ' + res.error.message, 'error', 6000);
+      return;
+    }
+    state.sheetRows = state.sheetRows.concat(res.data || []);
     state.fullSheet = q === '' && state.sheetRows.length >= state.sheetTotal;
     renderSheet();
   }
@@ -302,6 +325,8 @@
       if (tab && tab.kind === 'sheet') {
         state.sheetCols = await fetchSheetColumns(tab.id);
         state.colWidths = loadColWidths();
+        state.hiddenCols = loadHiddenCols();
+        state.colAutoWidths = {};
         state.todos = [];
         state.categories = [];
         await loadSheetRows(true);
@@ -1937,7 +1962,7 @@
   }
 
   function renderSheet() {
-    var cols = state.sheetCols;
+    var cols = visibleSheetCols();
     var rows = state.sheetRows;
     if (state.fullSheet && state.sheetQuery) {
       var q = state.sheetQuery.toLowerCase();
@@ -1947,6 +1972,10 @@
     var body = $('sheet-body');
 
     var searching = state.sheetQuery !== '';
+    $('sheet-nocols').textContent = state.sheetCols.length === 0
+      ? 'This sheet has no columns yet.'
+      : 'All columns are hidden — tick some under “Columns”.';
+    updateColVisButton();
     $('sheet-nocols').classList.toggle('hidden', cols.length > 0);
     $('sheet-empty').classList.toggle('hidden', !(cols.length > 0 && rows.length === 0 && !searching));
     $('sheet-nomatch').classList.toggle('hidden', !(rows.length === 0 && searching));
@@ -2090,6 +2119,78 @@
     }
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
+  }
+
+  // ---------- column display filter ----------
+
+  function colVisKey() { return 'tenways.colvis.' + state.currentTabId; }
+
+  function loadHiddenCols() {
+    try { return new Set(JSON.parse(window.localStorage.getItem(colVisKey()) || '[]')); }
+    catch (e) { return new Set(); }
+  }
+
+  function saveHiddenCols() {
+    try { window.localStorage.setItem(colVisKey(), JSON.stringify(Array.from(state.hiddenCols))); }
+    catch (e) { /* private mode */ }
+  }
+
+  function visibleSheetCols() {
+    return state.sheetCols.filter(function (c) { return !state.hiddenCols.has(c.key); });
+  }
+
+  function updateColVisButton() {
+    var hidden = state.sheetCols.filter(function (c) { return state.hiddenCols.has(c.key); }).length;
+    $('btn-colvis').textContent = hidden ? 'Columns · ' + hidden + ' hidden' : 'Columns';
+  }
+
+  function closeColVisPanel() {
+    var p = $('colvis-panel');
+    if (p.classList.contains('hidden')) return false;
+    p.classList.add('hidden');
+    return true;
+  }
+
+  function toggleColVisPanel() {
+    var p = $('colvis-panel');
+    if (!p.classList.contains('hidden')) { p.classList.add('hidden'); return; }
+    buildColVisPanel();
+    p.classList.remove('hidden');
+  }
+
+  function buildColVisPanel() {
+    var p = $('colvis-panel');
+    p.replaceChildren();
+    function onTick() {
+      saveHiddenCols();
+      buildColVisPanel();
+      updateColVisButton();
+      renderSheet();
+    }
+    var all = el('label', 'msel-row msel-everyone');
+    var allCb = document.createElement('input');
+    allCb.type = 'checkbox';
+    allCb.checked = state.hiddenCols.size === 0;
+    allCb.addEventListener('change', function () {
+      state.hiddenCols.clear();
+      onTick();
+    });
+    all.appendChild(allCb);
+    all.appendChild(el('span', null, 'Show all columns'));
+    p.appendChild(all);
+    state.sheetCols.forEach(function (c) {
+      var row = el('label', 'msel-row');
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = !state.hiddenCols.has(c.key);
+      cb.addEventListener('change', function () {
+        if (cb.checked) state.hiddenCols.delete(c.key); else state.hiddenCols.add(c.key);
+        onTick();
+      });
+      row.appendChild(cb);
+      row.appendChild(el('span', null, c.name));
+      p.appendChild(row);
+    });
   }
 
   // ---------- cell links (right-click a text cell) ----------
@@ -2438,6 +2539,7 @@
     document.addEventListener('keydown', function (e) {
       if (e.key === 'Escape') {
         if (closeCellMenu()) return;               // Escape closes the cell menu first
+        if (closeColVisPanel()) return;            // then the columns filter
         if (closeAllPanels()) return;              // then an open dropdown
         if (linkModal) { closeLinkModal(); return; }
         if (catModal.open) { closeCatModal(); return; }
@@ -2539,7 +2641,9 @@
     });
     document.addEventListener('mousedown', function (e) {
       if (!e.target.closest || !e.target.closest('#cell-menu')) closeCellMenu();
+      if (!e.target.closest || !e.target.closest('.colvis')) closeColVisPanel();
     });
+    $('btn-colvis').addEventListener('click', toggleColVisPanel);
     document.addEventListener('scroll', function () { closeCellMenu(); }, true);
     $('row-form').addEventListener('submit', saveRow);
     $('btn-row-cancel').addEventListener('click', closeRowModal);
