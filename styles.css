@@ -1032,3 +1032,9 @@ th.sheet-gutter { z-index: 3; }
 @media (max-width: 720px) {
   #sheet-body td.empty-cell { display: none; }
 }
+
+/* the TENWAYS logo in the header */
+.app-logo { height: 30px; width: auto; display: block; }
+@media (max-width: 720px) {
+  .app-logo { height: 24px; }
+}
