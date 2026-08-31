@@ -502,6 +502,12 @@
       asgIds.length === 0 ? 'Everyone' : (asgNames.join(', ') || '—')));
     tr.appendChild(tdAsg);
 
+    var tdCr = el('td', 'col-created');
+    tdCr.appendChild(el('div', 'created-when', formatDue(String(t.created_at).slice(0, 10))));
+    tdCr.appendChild(el('div', 'created-who muted small', personName(t.creator)));
+    tdCr.title = 'Created by ' + personName(t.creator) + ' on ' + fullTime(t.created_at);
+    tr.appendChild(tdCr);
+
     var tdEd = el('td', 'col-edited');
     var who = personName(t.editor);
     tdEd.appendChild(el('div', 'edited-who', who));

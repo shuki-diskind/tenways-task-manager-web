@@ -615,6 +615,9 @@ tbody tr:hover td { background: var(--row-hover); }
   .col-assigned { flex: 1 1 100%; }
   .col-assigned .assigned-names { max-width: none; }
   .col-assigned .assigned-names::before { content: "Assigned: "; color: var(--muted); }
+  .col-created { flex: 1 1 100%; display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
+  .col-created .created-when::before { content: "Created "; color: var(--muted); }
+  .col-created .created-who::before { content: "by "; }
   .col-edited { flex: 1 1 100%; display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
   .col-edited .edited-who::before { content: "Edited by "; color: var(--muted); font-weight: 400; }
   .col-actions { position: absolute; top: 8px; right: 8px; padding: 0; }
