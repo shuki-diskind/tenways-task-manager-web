@@ -710,6 +710,29 @@ tbody tr:hover td { background: var(--row-hover); }
 #sheet-body td.sheet-gutter { cursor: grab; }
 body.row-dragging { cursor: grabbing; user-select: none; }
 body.row-dragging #sheet-body tr:hover td { box-shadow: none; }
+tr.row-clipboard td {
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
+}
+@keyframes cellflash {
+  from { background-color: rgba(79, 70, 229, 0.38); }
+}
+#sheet-body td.cell-flash { animation: cellflash 1.3s ease-out; }
+tr.row-flash td { animation: cellflash 1.7s ease-out; }
+#sheet-body td.cell-fill-preview {
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
+}
+.fill-handle {
+  position: fixed;
+  width: 10px;
+  height: 10px;
+  background: var(--accent);
+  border: 1.5px solid var(--panel);
+  border-radius: 2px;
+  z-index: 260;
+  cursor: crosshair;
+}
 #sheet-body td.cell-selected {
   outline: 2px solid var(--accent);
   outline-offset: -2px;

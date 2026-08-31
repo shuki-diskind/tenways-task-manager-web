@@ -104,6 +104,8 @@
     colWidths: {},      // per-tab column widths, remembered in this browser
     colAutoWidths: {},  // measured default widths for the current sheet
     hiddenCols: new Set(), // column keys hidden by the "Columns" filter
+    sortDir: 'desc',    // 'desc' = newest first, 'asc' = oldest first
+    flashRowId: null,   // row to flash after a paste/move
     renderedRows: [],   // the rows renderSheet last displayed, in order
     restorePending: false, // restore the saved scroll spot after next render
     fullSheet: false,   // desktop: every row of the sheet is in memory
@@ -277,6 +279,7 @@
     }
     var res = await sb.rpc('search_sheet_rows', {
       p_tab: tab.id, p_q: q, p_limit: SHEET_PAGE, p_offset: state.sheetRows.length,
+      p_dir: state.sortDir,
     });
     if (res.error) {
       toast('Could not load rows: ' + res.error.message, 'error', 6000);
@@ -328,6 +331,8 @@
         state.sheetCols = await fetchSheetColumns(tab.id);
         state.colWidths = loadColWidths();
         state.hiddenCols = loadHiddenCols();
+        state.sortDir = loadSortDir();
+        $('sheet-sortdir').value = state.sortDir;
         state.colAutoWidths = {};
         state.todos = [];
         state.categories = [];
@@ -1574,7 +1579,7 @@
       state.sheetRows[i] = Object.assign({}, state.sheetRows[i], rec);
     } else if (p.eventType === 'INSERT') {
       state.sheetRows.push(rec);
-      state.sheetRows.sort(function (a, b) { return (b.position || 0) - (a.position || 0); });
+      sortLoadedRows();
       state.sheetTotal += 1;
     } else {
       return;   // an update to a row this phone hasn't paged in yet
@@ -2120,6 +2125,9 @@
     function buildTr(row, index) {
       var status = row.data ? String(row.data.status || '').toLowerCase() : '';
       var tint = (status === 'green' || status === 'yellow' || status === 'red') ? ' st-' + status : '';
+      if (rowClipboard && rowClipboard.rowId === row.id &&
+          rowClipboard.tabId === state.currentTabId) tint += ' row-clipboard';
+      if (state.flashRowId === row.id) tint += ' row-flash';
       var tr = el('tr', 'sheet-row-open' + tint);
       var gutter = el('td', 'sheet-gutter');
       var openBtn = el('button', 'row-open-btn', '\u270E');
@@ -2238,6 +2246,22 @@
   }
 
   // ---------- column display filter ----------
+
+  function sortDirKey() { return 'tenways.sortdir.' + state.currentTabId; }
+
+  function loadSortDir() {
+    try { return window.localStorage.getItem(sortDirKey()) === 'asc' ? 'asc' : 'desc'; }
+    catch (e) { return 'desc'; }
+  }
+
+  function dirSign() { return state.sortDir === 'asc' ? -1 : 1; }
+
+  function sortLoadedRows() {
+    var s = dirSign();
+    state.sheetRows.sort(function (a, b) {
+      return s * ((Number(b.position) || 0) - (Number(a.position) || 0));
+    });
+  }
 
   function colVisKey() { return 'tenways.colvis.' + state.currentTabId; }
 
@@ -2419,12 +2443,36 @@
 
   var cellSel = null;    // { a: {r, c}, b: {r, c} } over renderedRows / visible cols
   var cellDragging = false;
+  var flashSelection = false;
 
   function clearCellSelection() {
     cellSel = null;
     document.querySelectorAll('#sheet-body td.cell-selected').forEach(function (td) {
       td.classList.remove('cell-selected');
     });
+    positionFillHandle();
+  }
+
+  function positionFillHandle() {
+    var h = $('fill-handle');
+    if (!cellSel || isPhone() || !canEditCurrentTab()) { h.classList.add('hidden'); return; }
+    var body = $('sheet-body');
+    var r2 = Math.max(cellSel.a.r, cellSel.b.r);
+    var c2 = Math.max(cellSel.a.c, cellSel.b.c);
+    var tr = body.children[r2];
+    var td = tr && tr.children[c2 + 1];
+    var wrapEl = document.querySelector('#sheet-view .table-wrap');
+    if (!td || !wrapEl) { h.classList.add('hidden'); return; }
+    var rect = td.getBoundingClientRect();
+    var wrap = wrapEl.getBoundingClientRect();
+    if (rect.bottom < wrap.top + 30 || rect.top > wrap.bottom ||
+        rect.right < wrap.left || rect.left > wrap.right) {
+      h.classList.add('hidden');
+      return;
+    }
+    h.style.left = (rect.right - 5) + 'px';
+    h.style.top = (rect.bottom - 5) + 'px';
+    h.classList.remove('hidden');
   }
 
   function applyCellSelection() {
@@ -2445,6 +2493,159 @@
         var td = tr.children[c + 1];   // +1 skips the row-number gutter
         if (td) td.classList.add('cell-selected');
       }
+    }
+    if (flashSelection) {
+      flashSelection = false;
+      document.querySelectorAll('#sheet-body td.cell-selected').forEach(function (td) {
+        td.classList.add('cell-flash');
+      });
+      window.setTimeout(function () {
+        document.querySelectorAll('#sheet-body td.cell-flash').forEach(function (td) {
+          td.classList.remove('cell-flash');
+        });
+      }, 1400);
+    }
+    positionFillHandle();
+  }
+
+  // ---------- the fill handle: drag to copy / continue a series ----------
+
+  var fillDrag = null;
+
+  function cellIndexOfTd(td) {
+    var tr = td.parentElement;
+    var body = $('sheet-body');
+    var r = Array.prototype.indexOf.call(body.children, tr);
+    var c = Array.prototype.indexOf.call(tr.children, td) - 1;
+    return (r >= 0 && c >= 0) ? { r: r, c: c } : null;
+  }
+
+  function clearFillPreview() {
+    document.querySelectorAll('#sheet-body td.cell-fill-preview').forEach(function (td) {
+      td.classList.remove('cell-fill-preview');
+    });
+  }
+
+  function startFillDrag(ev) {
+    if (!cellSel || isPhone() || !canEditCurrentTab()) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    fillDrag = {
+      r1: Math.min(cellSel.a.r, cellSel.b.r), r2: Math.max(cellSel.a.r, cellSel.b.r),
+      c1: Math.min(cellSel.a.c, cellSel.b.c), c2: Math.max(cellSel.a.c, cellSel.b.c),
+      target: null,
+    };
+    document.addEventListener('mousemove', onFillDragMove);
+    document.addEventListener('mouseup', onFillDragUp);
+  }
+
+  function onFillDragMove(e) {
+    if (!fillDrag) return;
+    var under = document.elementFromPoint(e.clientX, e.clientY);
+    var td = under && under.closest ? under.closest('#sheet-body td') : null;
+    clearFillPreview();
+    fillDrag.target = null;
+    if (!td) return;
+    var idx = cellIndexOfTd(td);
+    if (!idx) return;
+    var d = fillDrag;
+    var beyondV = idx.r > d.r2 ? idx.r - d.r2 : (idx.r < d.r1 ? idx.r - d.r1 : 0);
+    var beyondH = idx.c > d.c2 ? idx.c - d.c2 : (idx.c < d.c1 ? idx.c - d.c1 : 0);
+    var t = null;
+    if (beyondV !== 0 && Math.abs(beyondV) >= Math.abs(beyondH)) {
+      t = beyondV > 0
+        ? { r1: d.r2 + 1, r2: idx.r, c1: d.c1, c2: d.c2, axis: 'v', dir: 1 }
+        : { r1: idx.r, r2: d.r1 - 1, c1: d.c1, c2: d.c2, axis: 'v', dir: -1 };
+    } else if (beyondH !== 0) {
+      t = beyondH > 0
+        ? { r1: d.r1, r2: d.r2, c1: d.c2 + 1, c2: idx.c, axis: 'h', dir: 1 }
+        : { r1: d.r1, r2: d.r2, c1: idx.c, c2: d.c1 - 1, axis: 'h', dir: -1 };
+    }
+    fillDrag.target = t;
+    if (!t) return;
+    var body = $('sheet-body');
+    for (var r = t.r1; r <= t.r2; r++) {
+      var tr = body.children[r];
+      if (!tr) continue;
+      for (var c = t.c1; c <= t.c2; c++) {
+        var cell = tr.children[c + 1];
+        if (cell) cell.classList.add('cell-fill-preview');
+      }
+    }
+  }
+
+  // Filling continues a series from a single source cell (numbers +1 per
+  // step, dates +1 day, "Item 3" becomes "Item 4"); ranges repeat as-is.
+  function fillValueFor(srcRow, col, step) {
+    var v = srcRow.data ? srcRow.data[col.key] : null;
+    if (v === undefined) v = null;
+    if (step === 0 || v === null || v === '') return v;
+    if (col.kind === 'number' || col.kind === 'uniquenumber') {
+      var num = Number(v);
+      return isFinite(num) ? num + step : v;
+    }
+    if (col.kind === 'date' && typeof v === 'string' && /^\d{4}-\d{2}-\d{2}/.test(v)) {
+      var dt = new Date(v.slice(0, 10) + 'T00:00:00Z');
+      dt.setUTCDate(dt.getUTCDate() + step);
+      return dt.toISOString().slice(0, 10);
+    }
+    if (typeof v === 'string') {
+      var t = v.trim();
+      if (/^-?\d+$/.test(t)) return String(Number(t) + step);
+      var m = v.match(/^(.*?)(\d+)\s*$/);
+      if (m) return m[1] + (Number(m[2]) + step);
+    }
+    return v;
+  }
+
+  async function onFillDragUp() {
+    document.removeEventListener('mousemove', onFillDragMove);
+    document.removeEventListener('mouseup', onFillDragUp);
+    clearFillPreview();
+    var d = fillDrag;
+    fillDrag = null;
+    if (!d || !d.target) return;
+    var t = d.target;
+    var rows = state.renderedRows || [];
+    var cols = visibleSheetCols();
+    var srcRows = d.r2 - d.r1 + 1;
+    var srcCols = d.c2 - d.c1 + 1;
+    var series = srcRows === 1 && srcCols === 1;
+    var changes = new Map();
+    for (var r = t.r1; r <= t.r2 && r < rows.length; r++) {
+      if (r < 0) continue;
+      for (var c = t.c1; c <= t.c2 && c < cols.length; c++) {
+        if (c < 0) continue;
+        var col = cols[c];
+        if (col.kind === 'autonumber') continue;
+        var value;
+        if (series) {
+          var step = t.axis === 'v'
+            ? (t.dir > 0 ? r - d.r2 : r - d.r1)
+            : (t.dir > 0 ? c - d.c2 : c - d.c1);
+          value = fillValueFor(rows[d.r1], col, step);
+        } else if (t.axis === 'v') {
+          var srcR = d.r1 + (((r - d.r1) % srcRows) + srcRows) % srcRows;
+          value = rows[srcR] && rows[srcR].data ? rows[srcR].data[col.key] : null;
+        } else {
+          var srcC = d.c1 + (((c - d.c1) % srcCols) + srcCols) % srcCols;
+          var srcCol = cols[srcC];
+          value = rows[r] && rows[r].data ? rows[r].data[srcCol.key] : null;
+        }
+        var e2 = changes.get(r) || { row: rows[r], patch: {} };
+        e2.patch[col.key] = value === undefined ? null : value;
+        changes.set(r, e2);
+      }
+    }
+    if (changes.size === 0) return;
+    var ok = await applyCellChanges(Array.from(changes.values()));
+    if (ok) {
+      cellSel = {
+        a: { r: Math.min(d.r1, t.r1), c: Math.min(d.c1, t.c1) },
+        b: { r: Math.max(d.r2, t.r2), c: Math.max(d.c2, t.c2) },
+      };
+      flashSelection = true;
+      applyCellSelection();
     }
   }
 
@@ -2490,51 +2691,108 @@
     return lines.join('\n');
   }
 
-  // Paste goes into exactly one cell, converted to that column's kind.
-  async function pasteIntoSelectedCell(text) {
-    if (!cellSel || !canEditCurrentTab()) return;
-    if (!selectionIsSingle()) {
-      toast('Paste works into a single cell — select just one.', 'warn', 4500);
-      return;
-    }
-    var rows = state.renderedRows || [];
-    var cols = visibleSheetCols();
-    var row = rows[cellSel.a.r];
-    var col = cols[cellSel.a.c];
-    if (!row || !col) return;
-    if (col.kind === 'autonumber') {
-      toast('Auto numbers are assigned automatically.', 'warn', 3500);
-      return;
-    }
-    var v = String(text == null ? '' : text).replace(/\r\n?/g, '\n');
-    var newVal;
+  // Converts pasted text to a column's kind. { ok:false } = does not fit.
+  function convertForKind(col, text) {
+    var v = String(text == null ? '' : text);
     if (col.kind === 'number' || col.kind === 'uniquenumber') {
-      var num = Number(v.trim().replace(/,/g, ''));
-      if (v.trim() === '') newVal = null;
-      else if (!isFinite(num)) { toast('That is not a number.', 'warn', 4000); return; }
-      else newVal = num;
-    } else if (col.kind === 'date') {
+      var t0 = v.trim();
+      if (t0 === '') return { ok: true, value: null };
+      var num = Number(t0.replace(/,/g, ''));
+      return isFinite(num) ? { ok: true, value: num } : { ok: false };
+    }
+    if (col.kind === 'date') {
       var t = v.trim();
       var dm = t.match(/^(\d{1,2})[\/.](\d{1,2})[\/.](\d{2}|\d{4})$/);
       if (dm) {
         var yy = dm[3].length === 2 ? '20' + dm[3] : dm[3];
         t = yy + '-' + String(dm[2]).padStart(2, '0') + '-' + String(dm[1]).padStart(2, '0');
       }
-      if (t !== '' && !/^\d{4}-\d{2}-\d{2}/.test(t)) {
-        toast('That does not look like a date.', 'warn', 4000);
-        return;
-      }
-      newVal = t === '' ? null : t.slice(0, 10);
-    } else if (col.kind === 'checkbox') {
-      newVal = /^(true|yes|1|y)$/i.test(v.trim());
-    } else if (col.kind === 'textarea') {
-      newVal = v.replace(/\t/g, ' ');
-      if (newVal === '') newVal = null;
-    } else {
-      newVal = v.replace(/[\t\n]+/g, ' ').trim();
-      if (newVal === '') newVal = null;
+      if (t === '') return { ok: true, value: null };
+      if (!/^\d{4}-\d{2}-\d{2}/.test(t)) return { ok: false };
+      return { ok: true, value: t.slice(0, 10) };
     }
-    await commitInlineValue(row, col, newVal);
+    if (col.kind === 'checkbox') return { ok: true, value: /^(true|yes|1|y)$/i.test(v.trim()) };
+    if (col.kind === 'textarea') {
+      var s = v.replace(/\t/g, ' ');
+      return { ok: true, value: s === '' ? null : s };
+    }
+    var s2 = v.replace(/[\t\n]+/g, ' ').trim();
+    return { ok: true, value: s2 === '' ? null : s2 };
+  }
+
+  // One optimistic-lock update per touched row; other keys stay untouched.
+  async function applyCellChanges(changes) {
+    var blocked = 0;
+    for (var i = 0; i < changes.length; i++) {
+      var ch = changes[i];
+      var cur = state.sheetRows.find(function (r) { return r.id === ch.row.id; }) || ch.row;
+      var data = Object.assign({}, cur.data || {});
+      Object.keys(ch.patch).forEach(function (k) { data[k] = ch.patch[k]; });
+      var upd = await sb.from('sheet_rows').update({ data: data })
+        .eq('id', cur.id).eq('version', cur.version).select(SHEET_ROW_SELECT);
+      if (upd.error) { toast('Row not saved: ' + upd.error.message, 'error', 5500); continue; }
+      if (!upd.data || upd.data.length === 0) { blocked++; continue; }
+      var j = state.sheetRows.findIndex(function (r) { return r.id === cur.id; });
+      if (j >= 0) state.sheetRows[j] = upd.data[0];
+    }
+    if (blocked > 0) {
+      toast(blocked + ' row(s) were just changed by someone else — reloading.', 'warn', 5000);
+      await loadSheetRows(true);
+      return false;
+    }
+    renderSheet();
+    return true;
+  }
+
+  // Paste: one value fills the whole selection; a block pastes from the
+  // selection's top-left corner, Excel-style.
+  async function pasteIntoSelectedCell(text) {
+    if (!cellSel || !canEditCurrentTab()) return;
+    var rows = state.renderedRows || [];
+    var cols = visibleSheetCols();
+    var raw = String(text == null ? '' : text).replace(/\r\n?/g, '\n');
+    if (raw.slice(-1) === '\n') raw = raw.slice(0, -1);
+    var grid = raw.split('\n').map(function (l) { return l.split('\t'); });
+    var single = grid.length === 1 && grid[0].length === 1;
+    var skipped = 0;
+    var changes = new Map();
+    function put(rIdx, cIdx, cellText) {
+      if (rIdx < 0 || cIdx < 0 || rIdx >= rows.length || cIdx >= cols.length) return;
+      var col = cols[cIdx];
+      if (col.kind === 'autonumber') { skipped++; return; }
+      var conv = convertForKind(col, cellText);
+      if (!conv.ok) { skipped++; return; }
+      var e = changes.get(rIdx) || { row: rows[rIdx], patch: {} };
+      e.patch[col.key] = conv.value;
+      changes.set(rIdx, e);
+    }
+    var r1 = Math.min(cellSel.a.r, cellSel.b.r), r2 = Math.max(cellSel.a.r, cellSel.b.r);
+    var c1 = Math.min(cellSel.a.c, cellSel.b.c), c2 = Math.max(cellSel.a.c, cellSel.b.c);
+    var rect;
+    if (single) {
+      for (var r = r1; r <= r2; r++) { for (var c = c1; c <= c2; c++) put(r, c, grid[0][0]); }
+      rect = { r1: r1, c1: c1, r2: r2, c2: c2 };
+    } else {
+      var maxW = 0;
+      grid.forEach(function (line, dr) {
+        if (line.length > maxW) maxW = line.length;
+        line.forEach(function (cellText, dc) { put(r1 + dr, c1 + dc, cellText); });
+      });
+      rect = { r1: r1, c1: c1,
+        r2: Math.min(r1 + grid.length - 1, rows.length - 1),
+        c2: Math.min(c1 + maxW - 1, cols.length - 1) };
+    }
+    if (changes.size === 0) {
+      if (skipped) toast('Nothing fitted those columns.', 'warn', 4000);
+      return;
+    }
+    var ok = await applyCellChanges(Array.from(changes.values()));
+    if (ok) {
+      cellSel = { a: { r: rect.r1, c: rect.c1 }, b: { r: rect.r2, c: rect.c2 } };
+      flashSelection = true;
+      applyCellSelection();
+    }
+    if (skipped) toast(skipped + ' cell(s) did not fit their column type.', 'warn', 4500);
   }
 
   // ---------- empty rows (right-click the row number) ----------
@@ -2550,10 +2808,13 @@
     m.appendChild(menuItem('＋ Add several rows…', function () { openMultiRowModal(row); }));
     m.appendChild(menuItem('✂ Cut row', function () {
       rowClipboard = { mode: 'cut', tabId: state.currentTabId, rowId: row.id };
+      renderSheet();   // shows the dashed clipboard highlight
       toast('Row cut — right-click another row number and pick where to paste it.', 'ok', 4500);
     }));
     m.appendChild(menuItem('⧉ Copy row', function () {
-      rowClipboard = { mode: 'copy', tabId: state.currentTabId, data: Object.assign({}, row.data || {}) };
+      rowClipboard = { mode: 'copy', tabId: state.currentTabId, rowId: row.id,
+        data: Object.assign({}, row.data || {}) };
+      renderSheet();   // shows the dashed clipboard highlight
       toast('Row copied — right-click a row number and pick where to paste it.', 'ok', 4500);
     }));
     if (rowClipboard && rowClipboard.tabId === state.currentTabId) {
@@ -2574,18 +2835,8 @@
       toast('Clear the search first — a new empty row would be hidden by it.', 'warn', 5000);
       return;
     }
-    var list = state.sheetRows;
-    var i = list.findIndex(function (r) { return r.id === row.id; });
-    if (i < 0) return;
-    var pos;
-    if (where === 'above') {
-      var higher = i > 0 ? list[i - 1] : null;
-      pos = higher ? (Number(row.position) + Number(higher.position)) / 2 : Number(row.position) + 1;
-    } else {
-      var lower = i < list.length - 1 ? list[i + 1] : null;
-      pos = lower ? (Number(row.position) + Number(lower.position)) / 2
-        : Number(row.position) - (list.length < state.sheetTotal ? 0.5 : 1);
-    }
+    var pos = insertPosNear(row, where);
+    if (pos === null) return;
     var ins = await sb.from('sheet_rows')
       .insert({ tab_id: state.currentTabId, position: pos, data: {} })
       .select(SHEET_ROW_SELECT).single();
@@ -2593,7 +2844,8 @@
       toast('Could not add a row: ' + ins.error.message, 'error', 6000);
       return;
     }
-    state.sheetRows.splice(where === 'above' ? i : i + 1, 0, ins.data);
+    state.sheetRows.push(ins.data);
+    sortLoadedRows();
     state.sheetTotal += 1;
     renderSheet();
     toast('Empty row added — double-click its cells to fill it in', 'ok', 4000);
@@ -2601,17 +2853,24 @@
 
   var rowClipboard = null;  // { mode: 'cut'|'copy', tabId, rowId?, data? }
 
-  function insertPosNear(row, where) {
+  // "Above"/"below" are VISUAL; with the sort direction switchable, the
+  // numeric direction flips with it. Midpoints between neighbours work
+  // either way; only the edges need the direction sign.
+  function neighborPosition(row, where) {
     var list = state.sheetRows;
     var i = list.findIndex(function (r) { return r.id === row.id; });
-    if (i < 0) return null;
-    if (where === 'above') {
-      var higher = i > 0 ? list[i - 1] : null;
-      return higher ? (Number(row.position) + Number(higher.position)) / 2 : Number(row.position) + 1;
-    }
-    var lower = i < list.length - 1 ? list[i + 1] : null;
-    return lower ? (Number(row.position) + Number(lower.position)) / 2
-      : Number(row.position) - (list.length < state.sheetTotal ? 0.5 : 1);
+    if (i < 0) return undefined;
+    var j = where === 'above' ? i - 1 : i + 1;
+    return (j >= 0 && j < list.length) ? Number(list[j].position) : null;
+  }
+
+  function insertPosNear(row, where) {
+    var np = neighborPosition(row, where);
+    if (np === undefined) return null;
+    var p = Number(row.position);
+    if (np !== null) return (p + np) / 2;
+    if (where === 'above') return p + dirSign();
+    return p - dirSign() * (state.sheetRows.length < state.sheetTotal ? 0.5 : 1);
   }
 
   async function pasteRowNear(target, where) {
@@ -2635,6 +2894,8 @@
       var i = state.sheetRows.findIndex(function (r) { return r.id === cur.id; });
       if (i >= 0) state.sheetRows[i] = upd.data[0];
       rowClipboard = null;
+      state.flashRowId = cur.id;
+      window.setTimeout(function () { state.flashRowId = null; }, 2000);
       toast('Row moved', 'ok');
     } else {
       var data = Object.assign({}, clip.data);
@@ -2648,9 +2909,11 @@
       if (ins.error) { toast('Could not paste the row: ' + ins.error.message, 'error', 6000); return; }
       state.sheetRows.push(ins.data);
       state.sheetTotal += 1;
+      state.flashRowId = ins.data.id;
+      window.setTimeout(function () { state.flashRowId = null; }, 2000);
       toast('Row pasted', 'ok');
     }
-    state.sheetRows.sort(function (a, b) { return (Number(b.position) || 0) - (Number(a.position) || 0); });
+    sortLoadedRows();
     renderSheet();
   }
 
@@ -2687,21 +2950,15 @@
     }
     var where = $('multirow-where').value;
     closeMultiRowModal();
-    var list = state.sheetRows;
-    var i = list.findIndex(function (r) { return r.id === row.id; });
-    if (i < 0) return;
     // spread the new rows evenly between the clicked row and its neighbour
-    var hi, lo;
-    if (where === 'above') {
-      var higher = i > 0 ? list[i - 1] : null;
-      lo = Number(row.position);
-      hi = higher ? Number(higher.position) : lo + count + 1;
-    } else {
-      var lower = i < list.length - 1 ? list[i + 1] : null;
-      hi = Number(row.position);
-      lo = lower ? Number(lower.position)
-        : hi - (list.length < state.sheetTotal ? 1 : count + 1);
+    var p = Number(row.position);
+    var adj = neighborPosition(row, where);
+    if (adj === undefined) return;
+    if (adj === null) {
+      adj = where === 'above' ? p + dirSign() * (count + 1)
+        : p - dirSign() * (state.sheetRows.length < state.sheetTotal ? 1 : count + 1);
     }
+    var lo = Math.min(p, adj), hi = Math.max(p, adj);
     var step = (hi - lo) / (count + 1);
     var inserts = [];
     for (var k = 1; k <= count; k++) {
@@ -2713,7 +2970,7 @@
       return;
     }
     state.sheetRows = state.sheetRows.concat(ins.data || []);
-    state.sheetRows.sort(function (a, b) { return (Number(b.position) || 0) - (Number(a.position) || 0); });
+    sortLoadedRows();
     state.sheetTotal += (ins.data || []).length;
     renderSheet();
     toast(count + ' empty rows added — double-click their cells to fill them in', 'ok', 4500);
@@ -2789,10 +3046,11 @@
     var above = idx > 0 ? list[idx - 1] : null;
     var below = idx < list.length ? list[idx] : null;
     var newPos;
-    if (!above) newPos = (below ? Number(below.position) : 0) + 1;
-    else if (!below) newPos = Number(above.position) -
-      (state.sheetRows.length < state.sheetTotal ? 0.5 : 1);
-    else newPos = (Number(above.position) + Number(below.position)) / 2;
+    if (above && below) newPos = (Number(above.position) + Number(below.position)) / 2;
+    else if (!above && below) newPos = Number(below.position) + dirSign();
+    else if (above) newPos = Number(above.position) -
+      dirSign() * (state.sheetRows.length < state.sheetTotal ? 0.5 : 1);
+    else return;
     var cur = state.sheetRows.find(function (r) { return r.id === d.row.id; });
     if (!cur) return;
     var upd = await sb.from('sheet_rows').update({ position: newPos })
@@ -2808,7 +3066,7 @@
     }
     var i = state.sheetRows.findIndex(function (r) { return r.id === cur.id; });
     if (i >= 0) state.sheetRows[i] = upd.data[0];
-    state.sheetRows.sort(function (a, b) { return (Number(b.position) || 0) - (Number(a.position) || 0); });
+    sortLoadedRows();
     renderSheet();
     toast('Row moved', 'ok');
   }
@@ -3380,7 +3638,12 @@
         if (tabModal.open) { closeTabModal(); return; }
         if (rowModal) { closeRowModal(); return; }
         if (cellSel) { clearCellSelection(); return; }
-        if (rowClipboard) { rowClipboard = null; toast('Cut / copy cancelled', 'ok', 1800); return; }
+        if (rowClipboard) {
+          rowClipboard = null;
+          renderSheet();
+          toast('Cut / copy cancelled', 'ok', 1800);
+          return;
+        }
         if (state.modal) closeModal();             // next one closes the modal
       }
     });
@@ -3520,6 +3783,14 @@
     }
     var sheetWrap = document.querySelector('#sheet-view .table-wrap');
     if (sheetWrap) sheetWrap.addEventListener('scroll', scheduleScrollSave);
+    if (sheetWrap) sheetWrap.addEventListener('scroll', positionFillHandle);
+    $('fill-handle').addEventListener('mousedown', startFillDrag);
+    $('sheet-sortdir').addEventListener('change', function () {
+      state.sortDir = $('sheet-sortdir').value === 'asc' ? 'asc' : 'desc';
+      try { window.localStorage.setItem(sortDirKey(), state.sortDir); } catch (e) { /* private mode */ }
+      clearCellSelection();
+      loadSheetRows(true);
+    });
     window.addEventListener('scroll', scheduleScrollSave);
     window.addEventListener('beforeunload', saveScrollState);
     $('btn-colvis').addEventListener('click', toggleColVisPanel);

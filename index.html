@@ -6,16 +6,16 @@
         content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src https: wss:; base-uri 'none'; form-action 'none'" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#4f46e5" />
-  <link rel="manifest" href="manifest.webmanifest?v=1.11.7" />
+  <link rel="manifest" href="manifest.webmanifest?v=1.11.8" />
   <link rel="icon" href="icons/icon-192.png" />
   <link rel="apple-touch-icon" href="icons/icon-180.png" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="TENWAYS Tasks" />
-  <meta name="app-version" content="1.11.7" />
+  <meta name="app-version" content="1.11.8" />
   <title>TENWAYS Task Manager</title>
-  <link rel="stylesheet" href="styles.css?v=1.11.7" />
+  <link rel="stylesheet" href="styles.css?v=1.11.8" />
 </head>
 <body>
 
@@ -149,6 +149,10 @@
             <button class="btn ghost" id="btn-colvis" title="Choose which columns are displayed">Columns</button>
             <div id="colvis-panel" class="msel-panel hidden"></div>
           </div>
+          <select id="sheet-sortdir" title="Row order">
+            <option value="desc">Newest first</option>
+            <option value="asc">Oldest first</option>
+          </select>
         </div>
         <div class="table-wrap">
           <table id="sheet-table">
@@ -418,6 +422,7 @@
   </div>
 
   <div id="cell-menu" class="cell-menu hidden"></div>
+  <div id="fill-handle" class="fill-handle hidden" title="Drag to fill the next cells"></div>
 
   <!-- Add several rows at once (from the row-number menu) -->
   <div id="multirow-backdrop" class="modal-backdrop hidden">
@@ -447,10 +452,10 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="vendor/supabase.js?v=1.11.7"></script>
-  <script src="config.js?v=1.11.7"></script>
-  <script src="js/client.js?v=1.11.7"></script>
-  <script src="js/app.js?v=1.11.7"></script>
-  <script src="js/auth.js?v=1.11.7"></script>
+  <script src="vendor/supabase.js?v=1.11.8"></script>
+  <script src="config.js?v=1.11.8"></script>
+  <script src="js/client.js?v=1.11.8"></script>
+  <script src="js/app.js?v=1.11.8"></script>
+  <script src="js/auth.js?v=1.11.8"></script>
 </body>
 </html>
