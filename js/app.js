@@ -107,6 +107,7 @@
     sortDir: 'desc',    // 'desc' = newest first, 'asc' = oldest first
     searchCols: null,   // null = search all columns; otherwise a Set of keys
     hits: [],           // matched cells of the current render, in display order
+    renderQueued: false, // a coalesced repaint is already scheduled
     hitIndex: 0,        // which hit prev/next is standing on
     flashRowId: null,   // row to flash after a paste/move
     renderedRows: [],   // the rows renderSheet last displayed, in order
@@ -1592,22 +1593,31 @@
       if (j >= 0) {
         state.sheetRows.splice(j, 1);
         state.sheetTotal = Math.max(0, state.sheetTotal - 1);
-        renderSheet();
+        requestRender();
       }
       return;
     }
     if (!rec || rec.tab_id !== tab.id) return;  // a different sheet tab
     var i = state.sheetRows.findIndex(function (r) { return r.id === rec.id; });
     if (i >= 0) {
-      state.sheetRows[i] = Object.assign({}, state.sheetRows[i], rec);
+      var local = state.sheetRows[i];
+      // our own save's echo: the screen already shows this version
+      if (Number(rec.version) <= (Number(local.version) || 0)) return;
+      var moved = Number(rec.position) !== Number(local.position);
+      state.sheetRows[i] = Object.assign({}, local, rec);
+      if (moved) {
+        sortLoadedRows();
+        requestRender();
+      } else {
+        updateRowDom(state.sheetRows[i]);
+      }
     } else if (p.eventType === 'INSERT') {
       state.sheetRows.push(rec);
       sortLoadedRows();
       state.sheetTotal += 1;
-    } else {
-      return;   // an update to a row this phone hasn't paged in yet
+      requestRender();
     }
-    renderSheet();
+    // updates to rows this device has not paged in are simply ignored
   }
 
   function connectRealtime() {
@@ -2079,6 +2089,81 @@
     return String(v);
   }
 
+  // Builds one row's DOM. Deliberately attaches NO event listeners — all
+  // interaction is delegated from the tbody, so a render only creates
+  // elements. This is what keeps heavy editing sessions fast.
+  function buildSheetTr(row, index, cols) {
+    var status = row.data ? String(row.data.status || '').toLowerCase() : '';
+    var tint = (status === 'green' || status === 'yellow' || status === 'red') ? ' st-' + status : '';
+    if (rowClipboard && rowClipboard.rowId === row.id &&
+        rowClipboard.tabId === state.currentTabId) tint += ' row-clipboard';
+    if (state.flashRowId === row.id) tint += ' row-flash';
+    var tr = el('tr', 'sheet-row-open' + tint);
+    var gutter = el('td', 'sheet-gutter');
+    var openBtn = el('button', 'row-open-btn', '✎');
+    openBtn.type = 'button';
+    openBtn.title = 'Open this row';
+    gutter.appendChild(openBtn);
+    gutter.appendChild(el('span', null, String(index + 1)));
+    gutter.title = 'Drag to move this row · right-click to insert rows';
+    tr.appendChild(gutter);
+    var q0 = state.sheetQuery ? state.sheetQuery.toLowerCase() : null;
+    cols.forEach(function (c, i) {
+      var text = sheetValue(row, c);
+      var link = cellLink(row, c);
+      var td = el('td', 'sheet-cell' + (i === 0 ? ' sheet-first' : '') +
+        (text || link ? '' : ' empty-cell'));
+      if (link) {
+        var a = document.createElement('a');
+        a.href = link;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        a.textContent = text || link;
+        td.appendChild(a);
+        td.title = (text ? text + '\n' : '') + link;
+      } else {
+        td.textContent = text;
+        if (text) td.title = text;    // full value on hover, since cells clip
+      }
+      td.setAttribute('data-label', c.name);
+      if (q0 && searchColActive(c)) {
+        if ((text && text.toLowerCase().indexOf(q0) >= 0) ||
+            (link && link.toLowerCase().indexOf(q0) >= 0)) {
+          td.classList.add('cell-hit');
+          state.hits.push({ r: index, c: i, colName: c.name });
+        }
+      }
+      tr.appendChild(td);
+    });
+    return tr;
+  }
+
+  // Schedules ONE repaint for a burst of changes (realtime floods, pastes).
+  function requestRender() {
+    if (state.renderQueued) return;
+    state.renderQueued = true;
+    window.requestAnimationFrame(function () {
+      state.renderQueued = false;
+      renderSheet();
+    });
+  }
+
+  // Repaints a single row in place — the hot path for cell edits.
+  function updateRowDom(rowLike) {
+    var fresh = state.sheetRows.find(function (r) { return r.id === rowLike.id; }) || rowLike;
+    var rows = state.renderedRows || [];
+    var i = rows.findIndex(function (r) { return r.id === fresh.id; });
+    if (i < 0) { requestRender(); return; }
+    rows[i] = fresh;
+    var body = $('sheet-body');
+    var old = body.children[i];
+    if (!old) { requestRender(); return; }
+    state.hits = state.hits.filter(function (h) { return h.r !== i; });
+    body.replaceChild(buildSheetTr(fresh, i, visibleSheetCols()), old);
+    applyCellSelection();
+    if (state.sheetQuery) updateSearchBar();
+  }
+
   function renderSheet() {
     var cols = visibleSheetCols();
     var rows = state.sortDir === 'asc' ? state.sheetRows.slice().reverse() : state.sheetRows;
@@ -2146,70 +2231,6 @@
     });
     head.replaceChildren(hr);
 
-    function buildTr(row, index) {
-      var status = row.data ? String(row.data.status || '').toLowerCase() : '';
-      var tint = (status === 'green' || status === 'yellow' || status === 'red') ? ' st-' + status : '';
-      if (rowClipboard && rowClipboard.rowId === row.id &&
-          rowClipboard.tabId === state.currentTabId) tint += ' row-clipboard';
-      if (state.flashRowId === row.id) tint += ' row-flash';
-      var tr = el('tr', 'sheet-row-open' + tint);
-      var gutter = el('td', 'sheet-gutter');
-      var openBtn = el('button', 'row-open-btn', '\u270E');
-      openBtn.type = 'button';
-      openBtn.title = 'Open this row';
-      openBtn.addEventListener('click', function (ev) {
-        ev.stopPropagation();
-        openRowModal('edit', row);
-      });
-      gutter.appendChild(openBtn);
-      gutter.appendChild(el('span', null, String(index + 1)));
-      gutter.title = 'Drag to move this row · right-click to insert rows';
-      gutter.addEventListener('contextmenu', function (ev) { openRowMenu(ev, row); });
-      gutter.addEventListener('mousedown', function (ev) { startRowDrag(ev, row); });
-      tr.appendChild(gutter);
-      cols.forEach(function (c, i) {
-        var text = sheetValue(row, c);
-        var link = cellLink(row, c);
-        var td = el('td', 'sheet-cell' + (i === 0 ? ' sheet-first' : '') +
-          (text || link ? '' : ' empty-cell'));
-        if (link) {
-          var a = document.createElement('a');
-          a.href = link;
-          a.target = '_blank';
-          a.rel = 'noopener noreferrer';
-          a.textContent = text || link;
-          // opening the link must not also open the row editor
-          a.addEventListener('click', function (ev) { ev.stopPropagation(); });
-          td.appendChild(a);
-          td.title = (text ? text + '\n' : '') + link;
-        } else {
-          td.textContent = text;
-          if (text) td.title = text;    // full value on hover, since cells clip
-        }
-        td.setAttribute('data-label', c.name);
-        if (state.sheetQuery && searchColActive(c)) {
-          var q0 = state.sheetQuery.toLowerCase();
-          if ((text && text.toLowerCase().indexOf(q0) >= 0) ||
-              (link && link.toLowerCase().indexOf(q0) >= 0)) {
-            td.classList.add('cell-hit');
-            state.hits.push({ r: index, c: i, colName: c.name });
-          }
-        }
-        td.addEventListener('contextmenu', function (ev) { openCellMenu(ev, row, c, index, i); });
-        td.addEventListener('mousedown', function (ev) { cellMouseDown(ev, index, i); });
-        td.addEventListener('mouseover', function () { cellMouseOver(index, i); });
-        td.addEventListener('dblclick', function (ev) {
-          ev.preventDefault();
-          if (!isPhone()) startInlineEdit(td, row, c);
-        });
-        tr.appendChild(td);
-      });
-      // Phones open the card editor on tap; on desktop the pencil in the
-      // gutter opens it, leaving clicks free for in-place editing.
-      tr.addEventListener('click', function () { if (isPhone()) openRowModal('edit', row); });
-      return tr;
-    }
-
     // Thousands of rows are appended in chunks so the app never freezes.
     var token = ++state.renderToken;
     body.replaceChildren();
@@ -2219,7 +2240,7 @@
       var frag = document.createDocumentFragment();
       for (var k = 0; k < 500 && i < rows.length; k++, i++) {
         try {
-          frag.appendChild(buildTr(rows[i], i));
+          frag.appendChild(buildSheetTr(rows[i], i, cols));
         } catch (err) {
           // one broken row must never blank the whole sheet
           console.log('[app] row render failed at ' + i + ': ' + err.message);
@@ -2684,7 +2705,8 @@
     var body = $('sheet-body');
     var r = Array.prototype.indexOf.call(body.children, tr);
     var c = Array.prototype.indexOf.call(tr.children, td) - 1;
-    return (r >= 0 && c >= 0) ? { r: r, c: c } : null;
+    // c is -1 for the row-number gutter; callers branch on it
+    return (r >= 0 && c >= -1) ? { r: r, c: c } : null;
   }
 
   function clearFillPreview() {
@@ -2714,7 +2736,7 @@
     fillDrag.target = null;
     if (!td) return;
     var idx = cellIndexOfTd(td);
-    if (!idx) return;
+    if (!idx || idx.c < 0) return;   // ignore the row-number gutter
     var d = fillDrag;
     var beyondV = idx.r > d.r2 ? idx.r - d.r2 : (idx.r < d.r1 ? idx.r - d.r1 : 0);
     var beyondH = idx.c > d.c2 ? idx.c - d.c2 : (idx.c < d.c1 ? idx.c - d.c1 : 0);
@@ -2901,13 +2923,13 @@
       if (!upd.data || upd.data.length === 0) { blocked++; continue; }
       var j = state.sheetRows.findIndex(function (r) { return r.id === cur.id; });
       if (j >= 0) state.sheetRows[j] = upd.data[0];
+      updateRowDom(upd.data[0]);
     }
     if (blocked > 0) {
       toast(blocked + ' row(s) were just changed by someone else — reloading.', 'warn', 5000);
       await loadSheetRows(true);
       return false;
     }
-    renderSheet();
     return true;
   }
 
@@ -3014,7 +3036,7 @@
     state.sheetRows.push(ins.data);
     sortLoadedRows();
     state.sheetTotal += 1;
-    renderSheet();
+    requestRender();
     toast('Empty row added — double-click its cells to fill it in', 'ok', 4000);
   }
 
@@ -3085,7 +3107,7 @@
       toast('Row pasted', 'ok');
     }
     sortLoadedRows();
-    renderSheet();
+    requestRender();
   }
 
   var multiRowFor = null;   // the row the "Add rows" dialog was opened from
@@ -3146,7 +3168,7 @@
     state.sheetRows = state.sheetRows.concat(ins.data || []);
     sortLoadedRows();
     state.sheetTotal += (ins.data || []).length;
-    renderSheet();
+    requestRender();
     toast(count + ' empty rows added — double-click their cells to fill them in', 'ok', 4500);
   }
 
@@ -3160,7 +3182,7 @@
     }
     state.sheetRows = state.sheetRows.filter(function (r) { return r.id !== row.id; });
     state.sheetTotal = Math.max(0, state.sheetTotal - 1);
-    renderSheet();
+    requestRender();
     toast('Row deleted', 'ok');
   }
 
@@ -3249,7 +3271,7 @@
     var i = state.sheetRows.findIndex(function (r) { return r.id === cur.id; });
     if (i >= 0) state.sheetRows[i] = upd.data[0];
     sortLoadedRows();
-    renderSheet();
+    requestRender();
     toast('Row moved', 'ok');
   }
 
@@ -3352,13 +3374,13 @@
       var newVal = val === '' ? null
         : ((col.kind === 'number' || col.kind === 'uniquenumber') ? Number(val) : val);
       var oldVal = v == null ? '' : String(v);
-      if (String(newVal == null ? '' : newVal) === oldVal) { renderSheet(); return; }
+      if (String(newVal == null ? '' : newVal) === oldVal) { updateRowDom(row); return; }
       commitInlineValue(row, col, newVal);
     }
     function cancel() {
       if (done) return;
       done = true;
-      renderSheet();
+      updateRowDom(row);
     }
     input.addEventListener('keydown', function (e) {
       if (e.key === 'Enter') {
@@ -3389,7 +3411,7 @@
       .eq('id', cur.id).eq('version', cur.version).select(SHEET_ROW_SELECT);
     if (upd.error) {
       toast('Could not save: ' + upd.error.message, 'error', 6000);
-      renderSheet();
+      updateRowDom(cur);   // restores just this row (removes the editor)
       return;
     }
     if (!upd.data || upd.data.length === 0) {
@@ -3399,7 +3421,7 @@
     }
     var i = state.sheetRows.findIndex(function (r) { return r.id === cur.id; });
     if (i >= 0) state.sheetRows[i] = upd.data[0];
-    renderSheet();
+    updateRowDom(upd.data[0]);
   }
 
   // ---------- cell links (right-click a text cell) ----------
@@ -3444,11 +3466,11 @@
            cIdx >= Math.min(cellSel.a.c, cellSel.b.c) && cIdx <= Math.max(cellSel.a.c, cellSel.b.c);
   }
 
-  function openCellMenu(ev, row, col, rIdx, cIdx) {
+  function openCellMenu(ev, row, col, rIdx, cIdx, tdArg) {
     ev.preventDefault();
     ev.stopPropagation();
     if (isPhone()) return;
-    var td = ev.currentTarget;
+    var td = tdArg || (ev.target.closest ? ev.target.closest('#sheet-body td') : ev.currentTarget);
     // right-clicking outside the current selection moves the selection there
     if (!cellInSelection(rIdx, cIdx)) {
       cellSel = { a: { r: rIdx, c: cIdx }, b: { r: rIdx, c: cIdx } };
@@ -3528,7 +3550,7 @@
     }
     var i = state.sheetRows.findIndex(function (r) { return r.id === rowId; });
     if (i >= 0) state.sheetRows[i] = upd.data[0];
-    renderSheet();
+    updateRowDom(upd.data[0]);
     toast(url ? 'Link saved on ' + colName : 'Link removed', 'ok');
   }
 
@@ -3737,10 +3759,11 @@
           .insert({ tab_id: state.currentTabId, position: maxPos + 1, data: data })
           .select(SHEET_ROW_SELECT).single();
         if (ins.error) throw ins.error;
-        state.sheetRows.unshift(ins.data);
+        state.sheetRows.push(ins.data);
+        sortLoadedRows();
         state.sheetTotal += 1;
         closeRowModal();
-        renderSheet();
+        requestRender();
         toast('Row added', 'ok');
         return;
       }
@@ -3752,7 +3775,7 @@
         var i = state.sheetRows.findIndex(function (r) { return r.id === rowModal.id; });
         if (i >= 0) state.sheetRows[i] = upd.data[0];
         closeRowModal();
-        renderSheet();
+        updateRowDom(upd.data[0]);
         toast('Saved', 'ok');
         return;
       }
@@ -3792,7 +3815,7 @@
       state.sheetRows = state.sheetRows.filter(function (r) { return r.id !== rowModal.id; });
       state.sheetTotal = Math.max(0, state.sheetTotal - 1);
       closeRowModal();
-      renderSheet();
+      requestRender();
       toast('Row deleted', 'ok');
     } catch (err) {
       setRowError('Could not delete: ' + err.message);
@@ -3971,6 +3994,56 @@
     var sheetWrap = document.querySelector('#sheet-view .table-wrap');
     if (sheetWrap) sheetWrap.addEventListener('scroll', scheduleScrollSave);
     if (sheetWrap) sheetWrap.addEventListener('scroll', positionFillHandle);
+    // All grid interaction is delegated from the tbody: rendering attaches
+    // zero listeners, which keeps repaints cheap during heavy editing.
+    var gridBody = $('sheet-body');
+    function gridInfo(target) {
+      var td = target.closest ? target.closest('#sheet-body td') : null;
+      if (!td) return null;
+      var idx = cellIndexOfTd(td);
+      if (!idx) return null;
+      var rows = state.renderedRows || [];
+      if (idx.r >= rows.length) return null;
+      if (idx.c < 0) return { td: td, r: idx.r, row: rows[idx.r], gutter: true };
+      var cols = visibleSheetCols();
+      if (idx.c >= cols.length) return null;
+      return { td: td, r: idx.r, c: idx.c, row: rows[idx.r], col: cols[idx.c] };
+    }
+    gridBody.addEventListener('click', function (ev) {
+      if (ev.target.closest && ev.target.closest('a')) return;   // links just open
+      var info = gridInfo(ev.target);
+      if (!info) return;
+      if (ev.target.closest && ev.target.closest('.row-open-btn')) {
+        openRowModal('edit', info.row);
+        return;
+      }
+      if (isPhone()) openRowModal('edit', info.row);
+    });
+    gridBody.addEventListener('dblclick', function (ev) {
+      var info = gridInfo(ev.target);
+      if (!info || info.gutter) return;
+      ev.preventDefault();
+      if (!isPhone()) startInlineEdit(info.td, info.row, info.col);
+    });
+    gridBody.addEventListener('contextmenu', function (ev) {
+      var info = gridInfo(ev.target);
+      if (!info) return;
+      if (info.gutter) openRowMenu(ev, info.row);
+      else openCellMenu(ev, info.row, info.col, info.r, info.c, info.td);
+    });
+    gridBody.addEventListener('mousedown', function (ev) {
+      if (ev.target.closest && ev.target.closest('a')) return;
+      if (ev.target.closest && ev.target.closest('.row-open-btn')) return;
+      var info = gridInfo(ev.target);
+      if (!info) return;
+      if (info.gutter) startRowDrag(ev, info.row);
+      else cellMouseDown(ev, info.r, info.c);
+    });
+    gridBody.addEventListener('mouseover', function (ev) {
+      if (!cellDragging) return;
+      var info = gridInfo(ev.target);
+      if (info && !info.gutter) cellMouseOver(info.r, info.c);
+    });
     $('fill-handle').addEventListener('mousedown', startFillDrag);
     $('sheet-sortdir').addEventListener('change', function () {
       state.sortDir = $('sheet-sortdir').value === 'asc' ? 'asc' : 'desc';
