@@ -2423,6 +2423,8 @@
     m.replaceChildren();
     m.appendChild(menuItem('＋ Add row above', function () { insertEmptyRowNear(row, 'above'); }));
     m.appendChild(menuItem('＋ Add row below', function () { insertEmptyRowNear(row, 'below'); }));
+    m.appendChild(menuItem('＋ Add several rows…', function () { openMultiRowModal(row); }));
+    m.appendChild(menuItem('✕ Delete this row…', function () { deleteRowDirect(row); }, 'danger-text'));
     m.classList.remove('hidden');
     m.style.left = Math.max(4, Math.min(ev.clientX, window.innerWidth - m.offsetWidth - 8)) + 'px';
     m.style.top = Math.max(4, Math.min(ev.clientY, window.innerHeight - m.offsetHeight - 8)) + 'px';
@@ -2458,6 +2460,85 @@
     state.sheetTotal += 1;
     renderSheet();
     toast('Empty row added — double-click its cells to fill it in', 'ok', 4000);
+  }
+
+  var multiRowFor = null;   // the row the "Add rows" dialog was opened from
+
+  function openMultiRowModal(row) {
+    if (state.sheetQuery) {
+      toast('Clear the search first — new empty rows would be hidden by it.', 'warn', 5000);
+      return;
+    }
+    multiRowFor = row;
+    $('multirow-count').value = '5';
+    $('multirow-where').value = 'below';
+    $('multirow-error').classList.add('hidden');
+    $('multirow-backdrop').classList.remove('hidden');
+    $('multirow-count').focus();
+    $('multirow-count').select();
+  }
+
+  function closeMultiRowModal() {
+    multiRowFor = null;
+    $('multirow-backdrop').classList.add('hidden');
+  }
+
+  async function onMultiRowAdd() {
+    var row = multiRowFor;
+    if (!row) return;
+    var count = Math.floor(Number($('multirow-count').value));
+    if (!(count >= 1 && count <= 100)) {
+      var e = $('multirow-error');
+      e.textContent = 'Enter a number of rows between 1 and 100.';
+      e.classList.remove('hidden');
+      return;
+    }
+    var where = $('multirow-where').value;
+    closeMultiRowModal();
+    var list = state.sheetRows;
+    var i = list.findIndex(function (r) { return r.id === row.id; });
+    if (i < 0) return;
+    // spread the new rows evenly between the clicked row and its neighbour
+    var hi, lo;
+    if (where === 'above') {
+      var higher = i > 0 ? list[i - 1] : null;
+      lo = Number(row.position);
+      hi = higher ? Number(higher.position) : lo + count + 1;
+    } else {
+      var lower = i < list.length - 1 ? list[i + 1] : null;
+      hi = Number(row.position);
+      lo = lower ? Number(lower.position)
+        : hi - (list.length < state.sheetTotal ? 1 : count + 1);
+    }
+    var step = (hi - lo) / (count + 1);
+    var inserts = [];
+    for (var k = 1; k <= count; k++) {
+      inserts.push({ tab_id: state.currentTabId, position: lo + step * k, data: {} });
+    }
+    var ins = await sb.from('sheet_rows').insert(inserts).select(SHEET_ROW_SELECT);
+    if (ins.error) {
+      toast('Could not add rows: ' + ins.error.message, 'error', 6000);
+      return;
+    }
+    state.sheetRows = state.sheetRows.concat(ins.data || []);
+    state.sheetRows.sort(function (a, b) { return (Number(b.position) || 0) - (Number(a.position) || 0); });
+    state.sheetTotal += (ins.data || []).length;
+    renderSheet();
+    toast(count + ' empty rows added — double-click their cells to fill them in', 'ok', 4500);
+  }
+
+  async function deleteRowDirect(row) {
+    if (!canEditCurrentTab()) return;
+    if (!window.confirm('Delete this row? This removes it for everyone who can see this tab.')) return;
+    var res = await sb.from('sheet_rows').delete().eq('id', row.id).select('id');
+    if (res.error) {
+      toast('Could not delete: ' + res.error.message, 'error', 6000);
+      return;
+    }
+    state.sheetRows = state.sheetRows.filter(function (r) { return r.id !== row.id; });
+    state.sheetTotal = Math.max(0, state.sheetTotal - 1);
+    renderSheet();
+    toast('Row deleted', 'ok');
   }
 
   // ---------- drag a row to a new position ----------
@@ -2713,8 +2794,8 @@
     return true;
   }
 
-  function menuItem(label, fn) {
-    var b = el('button', null, label);
+  function menuItem(label, fn, cls) {
+    var b = el('button', cls || null, label);
     b.type = 'button';
     b.addEventListener('click', function () { closeCellMenu(); fn(); });
     return b;
@@ -3067,6 +3148,7 @@
         if (closeColVisPanel()) return;            // then the columns filter
         if (closeAllPanels()) return;              // then an open dropdown
         if (linkModal) { closeLinkModal(); return; }
+        if (!$('multirow-backdrop').classList.contains('hidden')) { closeMultiRowModal(); return; }
         if (catModal.open) { closeCatModal(); return; }
         if (adminModal.open) { closeAdminModal(); return; }
         if (tabModal.open) { closeTabModal(); return; }
@@ -3158,6 +3240,14 @@
       var files = Array.prototype.slice.call(this.files || []);
       this.value = '';
       if (files.length) rowUploadAttachments(files);
+    });
+    $('btn-multirow-add').addEventListener('click', onMultiRowAdd);
+    $('btn-multirow-cancel').addEventListener('click', closeMultiRowModal);
+    $('multirow-count').addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); onMultiRowAdd(); }
+    });
+    $('multirow-backdrop').addEventListener('mousedown', function (e) {
+      if (e.target === e.currentTarget) closeMultiRowModal();
     });
     $('btn-link-save').addEventListener('click', onLinkSave);
     $('btn-link-cancel').addEventListener('click', closeLinkModal);
