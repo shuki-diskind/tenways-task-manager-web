@@ -2555,7 +2555,9 @@
       }
     });
     document.addEventListener('mousedown', function (e) {
-      if (!e.target.closest || !e.target.closest('.msel')) closeAllPanels();
+      // the Columns filter panel shares the dropdown styling; without this
+      // guard any press inside it closed it before the tick registered
+      if (!e.target.closest || !e.target.closest('.msel, .colvis')) closeAllPanels();
     });
     Object.keys(MSELS).forEach(function (key) {
       $('msel-btn-' + key).addEventListener('click', function () { toggleMselPanel(key); });
