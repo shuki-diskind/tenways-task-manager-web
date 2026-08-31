@@ -39,7 +39,7 @@
     if (col.kind === 'number' || col.kind === 'uniquenumber') return 72;
     if (col.kind === 'checkbox') return 72;
     if (col.kind === 'textarea') return 260;
-    if (col.kind === 'picklist') return 140;
+    if (col.kind === 'picklist' || col.kind === 'colorlist') return 140;
     return Math.min(260, Math.max(110, col.name.length * 9 + 30));
   }
 
@@ -1771,6 +1771,41 @@
   var tabModal = { open: false, mode: 'edit', view: new Set(), edit: new Set(),
     cols: [], deletedColIds: [] };
 
+  // The palette a coloured dropdown can use. Option entries are stored as
+  // "colour|Label"; the row wearing that value gets the matching tint.
+  var ROW_COLORS = ['green', 'yellow', 'red', 'blue', 'orange', 'purple',
+    'teal', 'pink', 'grey', 'brown'];
+
+  function parseColorOption(o) {
+    var s = String(o == null ? '' : o);
+    var i = s.indexOf('|');
+    if (i > 0 && ROW_COLORS.indexOf(s.slice(0, i)) >= 0) {
+      return { color: s.slice(0, i), label: s.slice(i + 1) };
+    }
+    return { color: 'grey', label: s };
+  }
+
+  function colorOptions(col) {
+    return (col.options || []).map(parseColorOption);
+  }
+
+  function colorListLabels(col) {
+    if (col.kind === 'colorlist') {
+      return colorOptions(col).map(function (o) { return o.label; });
+    }
+    return col.options || [];
+  }
+
+  // The first coloured-dropdown column (by order) decides the row colour.
+  function rowColorClass(row) {
+    var col = state.sheetCols.find(function (c) { return c.kind === 'colorlist'; });
+    if (!col) return '';
+    var v = row.data ? row.data[col.key] : null;
+    if (v == null || v === '') return '';
+    var opt = colorOptions(col).find(function (o) { return o.label === String(v); });
+    return opt ? ' rc-' + opt.color : '';
+  }
+
   var COL_KINDS = [
     ['text', 'Free text'],
     ['textarea', 'Free text (long)'],
@@ -1778,6 +1813,7 @@
     ['uniquenumber', 'Number (unique in its column)'],
     ['date', 'Date'],
     ['picklist', 'Dropdown list'],
+    ['colorlist', 'Coloured dropdown (colours the row)'],
     ['checkbox', 'Checkbox'],
     ['autonumber', 'Auto number'],
   ];
@@ -1944,6 +1980,65 @@
         });
         wrap.appendChild(opts);
       }
+      if (col.kind === 'colorlist') {
+        var box = el('div', 'coloropts');
+        var parsed = (col.options || []).map(parseColorOption);
+        var syncBack = function () {
+          // keep empty labels while editing (they are being typed);
+          // save-time cleanup drops the leftovers
+          col.options = parsed.map(function (o) { return o.color + '|' + o.label; });
+        };
+        parsed.forEach(function (o, oi) {
+          var line = el('div', 'coloropt-row');
+          var csel = document.createElement('select');
+          ROW_COLORS.forEach(function (cn) {
+            var op = el('option', null, cn);
+            op.value = cn;
+            if (o.color === cn) op.selected = true;
+            csel.appendChild(op);
+          });
+          csel.className = 'coloropt-color rc-bg-' + o.color;
+          csel.title = 'Row colour for this choice';
+          csel.addEventListener('change', function () {
+            o.color = csel.value;
+            syncBack();
+            renderTabCols();
+          });
+          var lin = document.createElement('input');
+          lin.type = 'text';
+          lin.maxLength = 60;
+          lin.placeholder = 'Choice label';
+          lin.value = o.label;
+          lin.addEventListener('input', function () {
+            o.label = lin.value;
+            syncBack();
+          });
+          var rm = el('button', 'btn ghost btn-small danger-text colmove', '✕');
+          rm.type = 'button';
+          rm.title = 'Remove this choice';
+          rm.addEventListener('click', function () {
+            parsed.splice(oi, 1);
+            syncBack();
+            renderTabCols();
+          });
+          line.appendChild(csel);
+          line.appendChild(lin);
+          line.appendChild(rm);
+          box.appendChild(line);
+        });
+        var addO = el('button', 'btn ghost btn-small', '＋ Add choice');
+        addO.type = 'button';
+        addO.addEventListener('click', function () {
+          syncBack();
+          col.options = col.options.concat([
+            ROW_COLORS[parsed.length % ROW_COLORS.length] + '|']);
+          renderTabCols();
+        });
+        box.appendChild(addO);
+        box.appendChild(el('div', 'muted small',
+          'Picking one of these choices colours the whole row.'));
+        wrap.appendChild(box);
+      }
     });
   }
 
@@ -1969,7 +2064,7 @@
     var updates = [];
     var inserts = [];
     tabModal.cols.forEach(function (col, i) {
-      var options = col.kind === 'picklist' ? (col.options || []) : [];
+      var options = (col.kind === 'picklist' || col.kind === 'colorlist') ? (col.options || []) : [];
       if (col.id) {
         updates.push({ id: col.id, tab_id: tabId, key: col.key, name: col.name.trim(),
           kind: col.kind, options: options, position: i });
@@ -2010,10 +2105,18 @@
       tabModal.edit.forEach(function (id) { tabModal.view.add(id); }); // edit implies view
       var kind = tabModalKind();
       if (kind === 'sheet') {
+        tabModal.cols.forEach(function (c) {   // drop half-typed colour choices
+          if (c.kind === 'colorlist') {
+            c.options = (c.options || [])
+              .map(function (o) { return parseColorOption(o); })
+              .filter(function (o) { return o.label.trim() !== ''; })
+              .map(function (o) { return o.color + '|' + o.label.trim(); });
+          }
+        });
         var unnamed = tabModal.cols.find(function (c) { return !c.name.trim(); });
         if (unnamed) { setTabError('Every column needs a name.'); btn.disabled = false; return; }
         var noOpts = tabModal.cols.find(function (c) {
-          return c.kind === 'picklist' && (c.options || []).length === 0;
+          return (c.kind === 'picklist' || c.kind === 'colorlist') && (c.options || []).length === 0;
         });
         if (noOpts) {
           setTabError('The dropdown column "' + noOpts.name + '" needs at least one choice.');
@@ -2093,8 +2196,7 @@
   // interaction is delegated from the tbody, so a render only creates
   // elements. This is what keeps heavy editing sessions fast.
   function buildSheetTr(row, index, cols) {
-    var status = row.data ? String(row.data.status || '').toLowerCase() : '';
-    var tint = (status === 'green' || status === 'yellow' || status === 'red') ? ' st-' + status : '';
+    var tint = rowColorClass(row);
     if (rowClipboard && rowClipboard.rowId === row.id &&
         rowClipboard.tabId === state.currentTabId) tint += ' row-clipboard';
     if (state.flashRowId === row.id) tint += ' row-flash';
@@ -2121,6 +2223,11 @@
         a.textContent = text || link;
         td.appendChild(a);
         td.title = (text ? text + '\n' : '') + link;
+      } else if (c.kind === 'colorlist' && text) {
+        var po = colorOptions(c).find(function (o) { return o.label === text; });
+        if (po) td.appendChild(el('span', 'rc-dot rc-dot-' + po.color, ''));
+        td.appendChild(document.createTextNode(text));
+        td.title = text;
       } else {
         td.textContent = text;
         if (text) td.title = text;    // full value on hover, since cells clip
@@ -3335,17 +3442,17 @@
     td.classList.add('editing');
     td.replaceChildren();
     var input;
-    if (col.kind === 'picklist') {
+    if (col.kind === 'picklist' || col.kind === 'colorlist') {
       input = document.createElement('select');
       var blank = el('option', null, '—');
       blank.value = '';
       input.appendChild(blank);
-      (col.options || []).forEach(function (o) {
+      colorListLabels(col).forEach(function (o) {
         var opt = el('option', null, o);
         opt.value = o;
         input.appendChild(opt);
       });
-      if (v && (col.options || []).indexOf(String(v)) < 0) {
+      if (v && colorListLabels(col).indexOf(String(v)) < 0) {
         var extra = el('option', null, String(v));
         extra.value = String(v);
         input.appendChild(extra);
@@ -3396,7 +3503,7 @@
       if (!input.isConnected) { done = true; return; }
       commit();
     });
-    if (col.kind === 'picklist') input.addEventListener('change', commit);
+    if (col.kind === 'picklist' || col.kind === 'colorlist') input.addEventListener('change', commit);
     input.addEventListener('click', function (e) { e.stopPropagation(); });
     input.addEventListener('dblclick', function (e) { e.stopPropagation(); });
   }
@@ -3593,18 +3700,18 @@
         input.type = 'checkbox';
         input.checked = (v === true || v === 'true');
         input.style.width = 'auto';
-      } else if (c.kind === 'picklist') {
+      } else if (c.kind === 'picklist' || c.kind === 'colorlist') {
         input = document.createElement('select');
         var blank = el('option', null, '—');
         blank.value = '';
         input.appendChild(blank);
-        (c.options || []).forEach(function (o) {
+        colorListLabels(c).forEach(function (o) {
           var opt = el('option', null, o);
           opt.value = o;
           if (String(v) === o) opt.selected = true;
           input.appendChild(opt);
         });
-        if (v && (c.options || []).indexOf(String(v)) < 0) {
+        if (v && colorListLabels(c).indexOf(String(v)) < 0) {
           var extra = el('option', null, String(v));
           extra.value = String(v);
           extra.selected = true;
