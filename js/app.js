@@ -36,7 +36,7 @@
 
   function defaultColWidth(col) {
     if (col.kind === 'date') return 104;
-    if (col.kind === 'number') return 72;
+    if (col.kind === 'number' || col.kind === 'uniquenumber') return 72;
     if (col.kind === 'checkbox') return 72;
     if (col.kind === 'textarea') return 260;
     if (col.kind === 'picklist') return 140;
@@ -1737,6 +1737,7 @@
     ['text', 'Free text'],
     ['textarea', 'Free text (long)'],
     ['number', 'Number'],
+    ['uniquenumber', 'Number (unique in its column)'],
     ['date', 'Date'],
     ['picklist', 'Dropdown list'],
     ['checkbox', 'Checkbox'],
@@ -2154,9 +2155,9 @@
           if (text) td.title = text;    // full value on hover, since cells clip
         }
         td.setAttribute('data-label', c.name);
-        if (c.kind === 'text' || c.kind === 'textarea') {
-          td.addEventListener('contextmenu', function (ev) { openCellMenu(ev, row, c); });
-        }
+        td.addEventListener('contextmenu', function (ev) { openCellMenu(ev, row, c, index, i); });
+        td.addEventListener('mousedown', function (ev) { cellMouseDown(ev, index, i); });
+        td.addEventListener('mouseover', function () { cellMouseOver(index, i); });
         td.addEventListener('dblclick', function (ev) {
           ev.preventDefault();
           if (!isPhone()) startInlineEdit(td, row, c);
@@ -2179,6 +2180,7 @@
       for (var k = 0; k < 500 && i < rows.length; k++, i++) frag.appendChild(buildTr(rows[i], i));
       body.appendChild(frag);
       if (i < rows.length) window.requestAnimationFrame(chunk);
+      else applyCellSelection();
     })();
 
     var total = state.sheetTotal;
@@ -2413,6 +2415,128 @@
     rowLoadAttachments();
   }
 
+  // ---------- Excel-style cell selection + copy / single-cell paste ----------
+
+  var cellSel = null;    // { a: {r, c}, b: {r, c} } over renderedRows / visible cols
+  var cellDragging = false;
+
+  function clearCellSelection() {
+    cellSel = null;
+    document.querySelectorAll('#sheet-body td.cell-selected').forEach(function (td) {
+      td.classList.remove('cell-selected');
+    });
+  }
+
+  function applyCellSelection() {
+    document.querySelectorAll('#sheet-body td.cell-selected').forEach(function (td) {
+      td.classList.remove('cell-selected');
+    });
+    if (!cellSel) return;
+    var rows = state.renderedRows || [];
+    var cols = visibleSheetCols();
+    var r1 = Math.min(cellSel.a.r, cellSel.b.r), r2 = Math.max(cellSel.a.r, cellSel.b.r);
+    var c1 = Math.min(cellSel.a.c, cellSel.b.c), c2 = Math.max(cellSel.a.c, cellSel.b.c);
+    if (r1 >= rows.length || c1 >= cols.length) { cellSel = null; return; }
+    var body = $('sheet-body');
+    for (var r = r1; r <= r2 && r < rows.length; r++) {
+      var tr = body.children[r];
+      if (!tr) continue;
+      for (var c = c1; c <= c2 && c < cols.length; c++) {
+        var td = tr.children[c + 1];   // +1 skips the row-number gutter
+        if (td) td.classList.add('cell-selected');
+      }
+    }
+  }
+
+  function cellMouseDown(ev, rIdx, cIdx) {
+    if (isPhone() || ev.button !== 0) return;
+    if (ev.target.closest && ev.target.closest('a')) return;   // links open on click
+    // clicking away while editing must commit the editor first (blur)
+    if (!document.querySelector('.cell-editor')) ev.preventDefault();
+    if (ev.shiftKey && cellSel) {
+      cellSel.b = { r: rIdx, c: cIdx };
+    } else {
+      cellSel = { a: { r: rIdx, c: cIdx }, b: { r: rIdx, c: cIdx } };
+      cellDragging = true;
+    }
+    applyCellSelection();
+  }
+
+  function cellMouseOver(rIdx, cIdx) {
+    if (!cellDragging || !cellSel) return;
+    if (cellSel.b.r === rIdx && cellSel.b.c === cIdx) return;
+    cellSel.b = { r: rIdx, c: cIdx };
+    applyCellSelection();
+  }
+
+  function selectionIsSingle() {
+    return !!cellSel && cellSel.a.r === cellSel.b.r && cellSel.a.c === cellSel.b.c;
+  }
+
+  function selectionTSV() {
+    if (!cellSel) return null;
+    var rows = state.renderedRows || [];
+    var cols = visibleSheetCols();
+    var r1 = Math.min(cellSel.a.r, cellSel.b.r), r2 = Math.max(cellSel.a.r, cellSel.b.r);
+    var c1 = Math.min(cellSel.a.c, cellSel.b.c), c2 = Math.max(cellSel.a.c, cellSel.b.c);
+    var lines = [];
+    for (var r = r1; r <= r2 && r < rows.length; r++) {
+      var parts = [];
+      for (var c = c1; c <= c2 && c < cols.length; c++) {
+        parts.push(sheetValue(rows[r], cols[c]));
+      }
+      lines.push(parts.join('\t'));
+    }
+    return lines.join('\n');
+  }
+
+  // Paste goes into exactly one cell, converted to that column's kind.
+  async function pasteIntoSelectedCell(text) {
+    if (!cellSel || !canEditCurrentTab()) return;
+    if (!selectionIsSingle()) {
+      toast('Paste works into a single cell — select just one.', 'warn', 4500);
+      return;
+    }
+    var rows = state.renderedRows || [];
+    var cols = visibleSheetCols();
+    var row = rows[cellSel.a.r];
+    var col = cols[cellSel.a.c];
+    if (!row || !col) return;
+    if (col.kind === 'autonumber') {
+      toast('Auto numbers are assigned automatically.', 'warn', 3500);
+      return;
+    }
+    var v = String(text == null ? '' : text).replace(/\r\n?/g, '\n');
+    var newVal;
+    if (col.kind === 'number' || col.kind === 'uniquenumber') {
+      var num = Number(v.trim().replace(/,/g, ''));
+      if (v.trim() === '') newVal = null;
+      else if (!isFinite(num)) { toast('That is not a number.', 'warn', 4000); return; }
+      else newVal = num;
+    } else if (col.kind === 'date') {
+      var t = v.trim();
+      var dm = t.match(/^(\d{1,2})[\/.](\d{1,2})[\/.](\d{2}|\d{4})$/);
+      if (dm) {
+        var yy = dm[3].length === 2 ? '20' + dm[3] : dm[3];
+        t = yy + '-' + String(dm[2]).padStart(2, '0') + '-' + String(dm[1]).padStart(2, '0');
+      }
+      if (t !== '' && !/^\d{4}-\d{2}-\d{2}/.test(t)) {
+        toast('That does not look like a date.', 'warn', 4000);
+        return;
+      }
+      newVal = t === '' ? null : t.slice(0, 10);
+    } else if (col.kind === 'checkbox') {
+      newVal = /^(true|yes|1|y)$/i.test(v.trim());
+    } else if (col.kind === 'textarea') {
+      newVal = v.replace(/\t/g, ' ');
+      if (newVal === '') newVal = null;
+    } else {
+      newVal = v.replace(/[\t\n]+/g, ' ').trim();
+      if (newVal === '') newVal = null;
+    }
+    await commitInlineValue(row, col, newVal);
+  }
+
   // ---------- empty rows (right-click the row number) ----------
 
   function openRowMenu(ev, row) {
@@ -2424,6 +2548,19 @@
     m.appendChild(menuItem('＋ Add row above', function () { insertEmptyRowNear(row, 'above'); }));
     m.appendChild(menuItem('＋ Add row below', function () { insertEmptyRowNear(row, 'below'); }));
     m.appendChild(menuItem('＋ Add several rows…', function () { openMultiRowModal(row); }));
+    m.appendChild(menuItem('✂ Cut row', function () {
+      rowClipboard = { mode: 'cut', tabId: state.currentTabId, rowId: row.id };
+      toast('Row cut — right-click another row number and pick where to paste it.', 'ok', 4500);
+    }));
+    m.appendChild(menuItem('⧉ Copy row', function () {
+      rowClipboard = { mode: 'copy', tabId: state.currentTabId, data: Object.assign({}, row.data || {}) };
+      toast('Row copied — right-click a row number and pick where to paste it.', 'ok', 4500);
+    }));
+    if (rowClipboard && rowClipboard.tabId === state.currentTabId) {
+      var verb = rowClipboard.mode === 'cut' ? 'moved' : 'copied';
+      m.appendChild(menuItem('Paste ' + verb + ' row above', function () { pasteRowNear(row, 'above'); }));
+      m.appendChild(menuItem('Paste ' + verb + ' row below', function () { pasteRowNear(row, 'below'); }));
+    }
     m.appendChild(menuItem('✕ Delete this row…', function () { deleteRowDirect(row); }, 'danger-text'));
     m.classList.remove('hidden');
     m.style.left = Math.max(4, Math.min(ev.clientX, window.innerWidth - m.offsetWidth - 8)) + 'px';
@@ -2460,6 +2597,61 @@
     state.sheetTotal += 1;
     renderSheet();
     toast('Empty row added — double-click its cells to fill it in', 'ok', 4000);
+  }
+
+  var rowClipboard = null;  // { mode: 'cut'|'copy', tabId, rowId?, data? }
+
+  function insertPosNear(row, where) {
+    var list = state.sheetRows;
+    var i = list.findIndex(function (r) { return r.id === row.id; });
+    if (i < 0) return null;
+    if (where === 'above') {
+      var higher = i > 0 ? list[i - 1] : null;
+      return higher ? (Number(row.position) + Number(higher.position)) / 2 : Number(row.position) + 1;
+    }
+    var lower = i < list.length - 1 ? list[i + 1] : null;
+    return lower ? (Number(row.position) + Number(lower.position)) / 2
+      : Number(row.position) - (list.length < state.sheetTotal ? 0.5 : 1);
+  }
+
+  async function pasteRowNear(target, where) {
+    var clip = rowClipboard;
+    if (!clip || clip.tabId !== state.currentTabId) return;
+    var pos = insertPosNear(target, where);
+    if (pos === null) return;
+    if (clip.mode === 'cut') {
+      if (clip.rowId === target.id) { rowClipboard = null; return; }
+      var cur = state.sheetRows.find(function (r) { return r.id === clip.rowId; });
+      if (!cur) { toast('That row is no longer loaded.', 'warn', 4000); rowClipboard = null; return; }
+      var upd = await sb.from('sheet_rows').update({ position: pos })
+        .eq('id', cur.id).eq('version', cur.version).select(SHEET_ROW_SELECT);
+      if (upd.error) { toast('Could not move the row: ' + upd.error.message, 'error', 6000); return; }
+      if (!upd.data || upd.data.length === 0) {
+        toast('This row was just changed by someone else — reloading.', 'warn', 5000);
+        rowClipboard = null;
+        await loadSheetRows(true);
+        return;
+      }
+      var i = state.sheetRows.findIndex(function (r) { return r.id === cur.id; });
+      if (i >= 0) state.sheetRows[i] = upd.data[0];
+      rowClipboard = null;
+      toast('Row moved', 'ok');
+    } else {
+      var data = Object.assign({}, clip.data);
+      // the duplicate gets its own auto numbers; unique numbers start empty
+      state.sheetCols.forEach(function (c) {
+        if (c.kind === 'autonumber' || c.kind === 'uniquenumber') delete data[c.key];
+      });
+      var ins = await sb.from('sheet_rows')
+        .insert({ tab_id: state.currentTabId, position: pos, data: data })
+        .select(SHEET_ROW_SELECT).single();
+      if (ins.error) { toast('Could not paste the row: ' + ins.error.message, 'error', 6000); return; }
+      state.sheetRows.push(ins.data);
+      state.sheetTotal += 1;
+      toast('Row pasted', 'ok');
+    }
+    state.sheetRows.sort(function (a, b) { return (Number(b.position) || 0) - (Number(a.position) || 0); });
+    renderSheet();
   }
 
   var multiRowFor = null;   // the row the "Add rows" dialog was opened from
@@ -2703,7 +2895,8 @@
       input.value = v == null ? '' : String(v);
     } else {
       input = document.createElement('input');
-      input.type = col.kind === 'number' ? 'number' : (col.kind === 'date' ? 'date' : 'text');
+      input.type = (col.kind === 'number' || col.kind === 'uniquenumber') ? 'number'
+        : (col.kind === 'date' ? 'date' : 'text');
       input.value = v == null ? '' : (col.kind === 'date' ? String(v).slice(0, 10) : String(v));
     }
     input.className = 'cell-editor';
@@ -2716,7 +2909,8 @@
       if (done) return;
       done = true;
       var val = input.value;
-      var newVal = val === '' ? null : (col.kind === 'number' ? Number(val) : val);
+      var newVal = val === '' ? null
+        : ((col.kind === 'number' || col.kind === 'uniquenumber') ? Number(val) : val);
       var oldVal = v == null ? '' : String(v);
       if (String(newVal == null ? '' : newVal) === oldVal) { renderSheet(); return; }
       commitInlineValue(row, col, newVal);
@@ -2801,20 +2995,51 @@
     return b;
   }
 
-  function openCellMenu(ev, row, col) {
+  function cellInSelection(rIdx, cIdx) {
+    if (!cellSel) return false;
+    return rIdx >= Math.min(cellSel.a.r, cellSel.b.r) && rIdx <= Math.max(cellSel.a.r, cellSel.b.r) &&
+           cIdx >= Math.min(cellSel.a.c, cellSel.b.c) && cIdx <= Math.max(cellSel.a.c, cellSel.b.c);
+  }
+
+  function openCellMenu(ev, row, col, rIdx, cIdx) {
     ev.preventDefault();
     ev.stopPropagation();
+    if (isPhone()) return;
     var td = ev.currentTarget;
+    // right-clicking outside the current selection moves the selection there
+    if (!cellInSelection(rIdx, cIdx)) {
+      cellSel = { a: { r: rIdx, c: cIdx }, b: { r: rIdx, c: cIdx } };
+      applyCellSelection();
+    }
     var link = cellLink(row, col);
     var canEdit = canEditCurrentTab();
-    if (!link && !canEdit) return;
     var m = $('cell-menu');
     m.replaceChildren();
+    m.appendChild(menuItem('Copy', function () {
+      var tsv = selectionTSV();
+      if (tsv == null) return;
+      navigator.clipboard.writeText(tsv).then(function () {
+        toast('Copied', 'ok', 1500);
+      }, function () {
+        toast('Press Ctrl+C to copy.', 'warn', 3500);
+      });
+    }));
+    if (canEdit) {
+      m.appendChild(menuItem('Paste', function () {
+        navigator.clipboard.readText().then(function (text) {
+          pasteIntoSelectedCell(text);
+        }, function () {
+          toast('Press Ctrl+V to paste.', 'warn', 3500);
+        });
+      }));
+      if (col.kind !== 'autonumber') {
+        m.appendChild(menuItem('Edit cell…', function () { startInlineEdit(td, row, col); }));
+      }
+    }
     if (link) m.appendChild(menuItem('Open link', function () {
       window.open(link, '_blank', 'noopener');
     }));
-    if (canEdit) {
-      m.appendChild(menuItem('Edit cell…', function () { startInlineEdit(td, row, col); }));
+    if (canEdit && (col.kind === 'text' || col.kind === 'textarea')) {
       m.appendChild(menuItem(link ? 'Edit link…' : 'Add link…', function () {
         openLinkModal(row, col);
       }));
@@ -2925,9 +3150,9 @@
         input.type = 'text';
         input.readOnly = true;
         input.value = v == null ? '(assigned automatically)' : String(v);
-      } else if (c.kind === 'number' || c.kind === 'date') {
+      } else if (c.kind === 'number' || c.kind === 'uniquenumber' || c.kind === 'date') {
         input = document.createElement('input');
-        input.type = c.kind;
+        input.type = c.kind === 'date' ? 'date' : 'number';
         input.value = v == null ? '' : (c.kind === 'date' ? String(v).slice(0, 10) : String(v));
       } else {
         // free-text cells wrap and grow with their content like the record
@@ -2991,7 +3216,8 @@
           typeof val === 'string' && /[\r\n]/.test(val)) {
         val = val.split(/\r\n|\r|\n/).join(' ');
       }
-      data[c.key] = val === '' ? null : (c.kind === 'number' ? Number(val) : val);
+      data[c.key] = val === '' ? null
+        : ((c.kind === 'number' || c.kind === 'uniquenumber') ? Number(val) : val);
       if (c.kind === 'text' || c.kind === 'textarea') {
         var li = $(rowFieldId(c) + '-link');
         if (li) {
@@ -3153,6 +3379,8 @@
         if (adminModal.open) { closeAdminModal(); return; }
         if (tabModal.open) { closeTabModal(); return; }
         if (rowModal) { closeRowModal(); return; }
+        if (cellSel) { clearCellSelection(); return; }
+        if (rowClipboard) { rowClipboard = null; toast('Cut / copy cancelled', 'ok', 1800); return; }
         if (state.modal) closeModal();             // next one closes the modal
       }
     });
@@ -3265,6 +3493,25 @@
     document.addEventListener('mousedown', function (e) {
       if (!e.target.closest || !e.target.closest('#cell-menu')) closeCellMenu();
       if (!e.target.closest || !e.target.closest('.colvis')) closeColVisPanel();
+    });
+    document.addEventListener('mouseup', function () { cellDragging = false; });
+    document.addEventListener('copy', function (e) {
+      var el2 = document.activeElement;
+      if (el2 && (el2.tagName === 'INPUT' || el2.tagName === 'TEXTAREA' || el2.tagName === 'SELECT')) return;
+      if (rowModal || state.modal || linkModal || tabModal.open) return;
+      var tsv = selectionTSV();
+      if (tsv == null) return;
+      e.clipboardData.setData('text/plain', tsv);
+      e.preventDefault();
+      toast('Copied', 'ok', 1500);
+    });
+    document.addEventListener('paste', function (e) {
+      var el2 = document.activeElement;
+      if (el2 && (el2.tagName === 'INPUT' || el2.tagName === 'TEXTAREA' || el2.tagName === 'SELECT')) return;
+      if (rowModal || state.modal || linkModal || tabModal.open) return;
+      if (!cellSel) return;
+      e.preventDefault();
+      pasteIntoSelectedCell(e.clipboardData.getData('text/plain'));
     });
     var scrollSaveTimer = null;
     function scheduleScrollSave() {

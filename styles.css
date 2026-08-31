@@ -710,6 +710,16 @@ tbody tr:hover td { background: var(--row-hover); }
 #sheet-body td.sheet-gutter { cursor: grab; }
 body.row-dragging { cursor: grabbing; user-select: none; }
 body.row-dragging #sheet-body tr:hover td { box-shadow: none; }
+#sheet-body td.cell-selected {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  background: rgba(79, 70, 229, 0.12) !important;
+}
+#sheet-body td.cell-selected {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  background: rgba(79, 70, 229, 0.12) !important;
+}
 .row-drop-line {
   position: fixed;
   height: 3px;
