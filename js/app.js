@@ -2214,6 +2214,94 @@
     });
   }
 
+  // ---------- sheet row attachments ----------
+  // Same bucket and path scheme as record attachments (<row_id>/<file>);
+  // the storage policies grant read to tab viewers, upload to tab editors.
+
+  async function rowLoadAttachments() {
+    var m = rowModal;
+    if (!m || m.mode !== 'edit' || !m.id) return;
+    var res = await sb.storage.from('attachments').list(m.id, {
+      limit: 100,
+      sortBy: { column: 'name', order: 'asc' },
+    });
+    if (res.error) {
+      console.log('[app] row attachments list failed: ' + res.error.message);
+      return;
+    }
+    if (!rowModal || rowModal.id !== m.id) return; // the modal moved on meanwhile
+    rowModal.attachments = res.data || [];
+    renderRowAttachments();
+  }
+
+  function renderRowAttachments() {
+    var list = $('row-attach-list');
+    list.replaceChildren();
+    var m = rowModal;
+    if (!m) return;
+    var canEdit = canEditCurrentTab();
+    var files = m.attachments || [];
+    files.forEach(function (f) {
+      var row = el('div', 'attach-row');
+      var name = el('a', 'attach-name', displayFileName(f.name));
+      name.href = '#';
+      name.title = 'Open / download';
+      name.addEventListener('click', function (e) {
+        e.preventDefault();
+        openAttachment(m.id, f.name);
+      });
+      row.appendChild(name);
+      row.appendChild(el('span', 'attach-size muted small', fmtSize(f.metadata && f.metadata.size)));
+      if (canEdit) {
+        var del = el('button', 'icon-btn danger', '✕');
+        del.type = 'button';
+        del.title = 'Delete attachment';
+        del.addEventListener('click', function () { rowDeleteAttachment(m.id, f.name); });
+        row.appendChild(del);
+      }
+      list.appendChild(row);
+    });
+    if (files.length === 0 && m.mode === 'edit') {
+      list.appendChild(el('div', 'muted small', 'No attachments yet.'));
+    }
+  }
+
+  async function rowUploadAttachments(files) {
+    var m = rowModal;
+    if (!m || m.mode !== 'edit' || !m.id) return;
+    var status = el('div', 'attach-uploading', 'Uploading…');
+    $('row-attach-list').prepend(status);
+    var failed = [];
+    for (var i = 0; i < files.length; i++) {
+      var f = files[i];
+      status.textContent = 'Uploading ' + f.name + ' (' + (i + 1) + '/' + files.length + ')…';
+      if (f.size > 25 * 1024 * 1024) {
+        failed.push(f.name + ' (over the 25 MB limit)');
+        continue;
+      }
+      var safe = f.name.replace(/[^\w.\-()]+/g, '_');
+      var res = await sb.storage.from('attachments').upload(m.id + '/' + Date.now() + '_' + safe, f);
+      if (res.error) failed.push(f.name + ' (' + res.error.message + ')');
+    }
+    await rowLoadAttachments();
+    if (failed.length) {
+      toast('Could not upload: ' + failed.join('; '), 'error', 8000);
+    } else {
+      toast(files.length === 1 ? 'File attached' : files.length + ' files attached', 'ok');
+    }
+  }
+
+  async function rowDeleteAttachment(rowId, name) {
+    if (!window.confirm('Delete attachment "' + displayFileName(name) + '"?')) return;
+    var res = await sb.storage.from('attachments').remove([rowId + '/' + name]);
+    if (res.error) {
+      toast('Could not delete: ' + res.error.message, 'error', 6000);
+      return;
+    }
+    toast('Attachment deleted', 'ok');
+    rowLoadAttachments();
+  }
+
   // ---------- in-place cell editing (double-click, like Excel) ----------
 
   function startInlineEdit(td, row, col) {
@@ -2548,7 +2636,13 @@
           ? 'Last edited by ' + profileName(row.updated_by) + ' ' + relTime(row.updated_at)
           : 'Imported from Smartsheet') + ' · version ' + row.version;
     buildRowFields(row);
+    rowModal.attachments = [];
     var editable = canEditCurrentTab();
+    $('btn-row-attach').disabled = mode !== 'edit';
+    $('btn-row-attach').classList.toggle('hidden', !editable);
+    $('row-attach-hint').classList.toggle('hidden', mode === 'edit' || !editable);
+    renderRowAttachments();
+    if (mode === 'edit') rowLoadAttachments();
     $('btn-row-save').classList.toggle('hidden', !editable);
     if (!editable) {
       $('btn-row-delete').classList.add('hidden');
@@ -2752,6 +2846,12 @@
     });
 
     $('btn-new-row').addEventListener('click', function () { openRowModal('create', null); });
+    $('btn-row-attach').addEventListener('click', function () { $('row-attach-input').click(); });
+    $('row-attach-input').addEventListener('change', function () {
+      var files = Array.prototype.slice.call(this.files || []);
+      this.value = '';
+      if (files.length) rowUploadAttachments(files);
+    });
     $('btn-link-save').addEventListener('click', onLinkSave);
     $('btn-link-cancel').addEventListener('click', closeLinkModal);
     $('btn-link-remove').addEventListener('click', function () {
