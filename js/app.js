@@ -279,7 +279,6 @@
     }
     var res = await sb.rpc('search_sheet_rows', {
       p_tab: tab.id, p_q: q, p_limit: SHEET_PAGE, p_offset: state.sheetRows.length,
-      p_dir: state.sortDir,
     });
     if (res.error) {
       toast('Could not load rows: ' + res.error.message, 'error', 6000);
@@ -287,7 +286,16 @@
     }
     state.sheetRows = state.sheetRows.concat(res.data || []);
     state.fullSheet = q === '' && state.sheetRows.length >= state.sheetTotal;
+    // In newest-at-bottom mode older pages appear ABOVE the current view;
+    // keep the reader anchored on the rows they were looking at.
+    var wrapEl = document.querySelector('#sheet-view .table-wrap');
+    var preH = (!reset && state.sortDir === 'asc' && wrapEl) ? wrapEl.scrollHeight : null;
     renderSheet();
+    if (preH !== null) {
+      window.setTimeout(function () {
+        wrapEl.scrollTop += (wrapEl.scrollHeight - preH);
+      }, 120);
+    }
   }
 
   var sheetSearchTimer = null;
@@ -2058,7 +2066,7 @@
 
   function renderSheet() {
     var cols = visibleSheetCols();
-    var rows = state.sheetRows;
+    var rows = state.sortDir === 'asc' ? state.sheetRows.slice().reverse() : state.sheetRows;
     if (state.fullSheet && state.sheetQuery) {
       var q = state.sheetQuery.toLowerCase();
       rows = rows.filter(function (r) { return rowMatchesQuery(r, q); });
@@ -2254,13 +2262,17 @@
     catch (e) { return 'desc'; }
   }
 
-  function dirSign() { return state.sortDir === 'asc' ? -1 : 1; }
-
   function sortLoadedRows() {
-    var s = dirSign();
     state.sheetRows.sort(function (a, b) {
-      return s * ((Number(b.position) || 0) - (Number(a.position) || 0));
+      return (Number(b.position) || 0) - (Number(a.position) || 0);
     });
+  }
+
+  // In "newest at bottom" mode the loaded rows are simply drawn bottom-up;
+  // visual up/down therefore flips relative to the master (newest-first) list.
+  function visualStep(where) {
+    var up = state.sortDir === 'asc' ? 1 : -1;   // master-index delta for "above"
+    return where === 'above' ? up : -up;
   }
 
   function colVisKey() { return 'tenways.colvis.' + state.currentTabId; }
@@ -2860,17 +2872,21 @@
     var list = state.sheetRows;
     var i = list.findIndex(function (r) { return r.id === row.id; });
     if (i < 0) return undefined;
-    var j = where === 'above' ? i - 1 : i + 1;
+    var j = i + visualStep(where);
     return (j >= 0 && j < list.length) ? Number(list[j].position) : null;
   }
 
   function insertPosNear(row, where) {
+    var list = state.sheetRows;
+    var i = list.findIndex(function (r) { return r.id === row.id; });
+    if (i < 0) return null;
     var np = neighborPosition(row, where);
-    if (np === undefined) return null;
     var p = Number(row.position);
     if (np !== null) return (p + np) / 2;
-    if (where === 'above') return p + dirSign();
-    return p - dirSign() * (state.sheetRows.length < state.sheetTotal ? 0.5 : 1);
+    // ran off an edge of the loaded list: which end of the master?
+    return (i + visualStep(where) < 0)
+      ? p + 1                                                    // beyond the newest row
+      : p - (list.length < state.sheetTotal ? 0.5 : 1);          // beyond the oldest loaded
   }
 
   async function pasteRowNear(target, where) {
@@ -2955,8 +2971,11 @@
     var adj = neighborPosition(row, where);
     if (adj === undefined) return;
     if (adj === null) {
-      adj = where === 'above' ? p + dirSign() * (count + 1)
-        : p - dirSign() * (state.sheetRows.length < state.sheetTotal ? 1 : count + 1);
+      var list2 = state.sheetRows;
+      var i2 = list2.findIndex(function (r) { return r.id === row.id; });
+      adj = (i2 + visualStep(where) < 0)
+        ? p + count + 1
+        : p - (list2.length < state.sheetTotal ? 1 : count + 1);
     }
     var lo = Math.min(p, adj), hi = Math.max(p, adj);
     var step = (hi - lo) / (count + 1);
@@ -3045,12 +3064,20 @@
     if (from < 0 || idx < 0 || idx === from || idx === from + 1) return;  // same spot
     var above = idx > 0 ? list[idx - 1] : null;
     var below = idx < list.length ? list[idx] : null;
+    var more = state.sheetRows.length < state.sheetTotal;
     var newPos;
     if (above && below) newPos = (Number(above.position) + Number(below.position)) / 2;
-    else if (!above && below) newPos = Number(below.position) + dirSign();
-    else if (above) newPos = Number(above.position) -
-      dirSign() * (state.sheetRows.length < state.sheetTotal ? 0.5 : 1);
-    else return;
+    else if (!above && below) {
+      // dropped at the very top of the view
+      newPos = state.sortDir === 'asc'
+        ? Number(below.position) - (more ? 0.5 : 1)   // top = oldest loaded
+        : Number(below.position) + 1;                 // top = newest
+    } else if (above) {
+      // dropped at the very bottom of the view
+      newPos = state.sortDir === 'asc'
+        ? Number(above.position) + 1                  // bottom = newest
+        : Number(above.position) - (more ? 0.5 : 1);  // bottom = oldest loaded
+    } else return;
     var cur = state.sheetRows.find(function (r) { return r.id === d.row.id; });
     if (!cur) return;
     var upd = await sb.from('sheet_rows').update({ position: newPos })
@@ -3789,7 +3816,21 @@
       state.sortDir = $('sheet-sortdir').value === 'asc' ? 'asc' : 'desc';
       try { window.localStorage.setItem(sortDirKey(), state.sortDir); } catch (e) { /* private mode */ }
       clearCellSelection();
-      loadSheetRows(true);
+      renderSheet();   // pure display flip — the loaded rows just turn over
+      var w = document.querySelector('#sheet-view .table-wrap');
+      if (w) w.scrollTop = 0;
+    });
+    function sheetScroller() {
+      return isPhone() ? null : document.querySelector('#sheet-view .table-wrap');
+    }
+    $('btn-goto-top').addEventListener('click', function () {
+      var w = sheetScroller();
+      if (w) w.scrollTop = 0; else window.scrollTo(0, 0);
+    });
+    $('btn-goto-end').addEventListener('click', function () {
+      var w = sheetScroller();
+      if (w) w.scrollTop = w.scrollHeight;
+      else window.scrollTo(0, document.body.scrollHeight);
     });
     window.addEventListener('scroll', scheduleScrollSave);
     window.addEventListener('beforeunload', saveScrollState);
