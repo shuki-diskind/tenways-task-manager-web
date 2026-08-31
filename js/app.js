@@ -275,7 +275,9 @@
 
   function rowMatchesQuery(row, q) {
     return state.sheetCols.some(function (c) {
-      return sheetValue(row, c).toLowerCase().indexOf(q) >= 0;
+      if (sheetValue(row, c).toLowerCase().indexOf(q) >= 0) return true;
+      var l = cellLink(row, c);
+      return !!(l && l.toLowerCase().indexOf(q) >= 0);
     });
   }
 
@@ -1438,6 +1440,37 @@
       : 'Live updates unavailable — use Refresh';
   }
 
+  // A change to one sheet row lands directly in the loaded rows — refetching
+  // a whole 7,000-row sheet for every save would make the app feel stuck.
+  function applySheetRowChange(p) {
+    var tab = currentTab();
+    if (!tab || tab.kind !== 'sheet') return;   // sheet events never affect task views
+    var rec = (p.new && p.new.id) ? p.new : null;
+    var oldRec = (p.old && p.old.id) ? p.old : null;
+    if (p.eventType === 'DELETE') {
+      if (!oldRec) return;
+      var j = state.sheetRows.findIndex(function (r) { return r.id === oldRec.id; });
+      if (j >= 0) {
+        state.sheetRows.splice(j, 1);
+        state.sheetTotal = Math.max(0, state.sheetTotal - 1);
+        renderSheet();
+      }
+      return;
+    }
+    if (!rec || rec.tab_id !== tab.id) return;  // a different sheet tab
+    var i = state.sheetRows.findIndex(function (r) { return r.id === rec.id; });
+    if (i >= 0) {
+      state.sheetRows[i] = Object.assign({}, state.sheetRows[i], rec);
+    } else if (p.eventType === 'INSERT') {
+      state.sheetRows.push(rec);
+      state.sheetRows.sort(function (a, b) { return (b.position || 0) - (a.position || 0); });
+      state.sheetTotal += 1;
+    } else {
+      return;   // an update to a row this phone hasn't paged in yet
+    }
+    renderSheet();
+  }
+
   function connectRealtime() {
     disconnectRealtime();
     state.channel = sb
@@ -1456,7 +1489,7 @@
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'sheet_rows' }, function (payload) {
         console.log('[app] realtime sheet rows: ' + payload.eventType);
-        scheduleReload();
+        applySheetRowChange(payload);
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'category_permissions' }, function (payload) {
         console.log('[app] realtime permissions: ' + payload.eventType);
@@ -1960,10 +1993,27 @@
       tr.appendChild(el('td', 'sheet-gutter', String((row.position || 0) + 1)));
       cols.forEach(function (c, i) {
         var text = sheetValue(row, c);
-        var td = el('td', 'sheet-cell' + (i === 0 ? ' sheet-first' : '') + (text ? '' : ' empty-cell'),
-          text || '—');
+        var link = cellLink(row, c);
+        var td = el('td', 'sheet-cell' + (i === 0 ? ' sheet-first' : '') +
+          (text || link ? '' : ' empty-cell'));
+        if (link) {
+          var a = document.createElement('a');
+          a.href = link;
+          a.target = '_blank';
+          a.rel = 'noopener noreferrer';
+          a.textContent = text || link;
+          // opening the link must not also open the row editor
+          a.addEventListener('click', function (ev) { ev.stopPropagation(); });
+          td.appendChild(a);
+          td.title = (text ? text + '\n' : '') + link;
+        } else {
+          td.textContent = text || '—';
+          if (text) td.title = text;    // full value on hover, since cells clip
+        }
         td.setAttribute('data-label', c.name);
-        if (text) td.title = text;      // full value on hover, since cells clip
+        if (c.kind === 'text' || c.kind === 'textarea') {
+          td.addEventListener('contextmenu', function (ev) { openCellMenu(ev, row, c); });
+        }
         tr.appendChild(td);
       });
       tr.addEventListener('click', function () { openRowModal('edit', row); });
@@ -2042,6 +2092,117 @@
     document.addEventListener('mouseup', onUp);
   }
 
+  // ---------- cell links (right-click a text cell) ----------
+
+  var linkModal = null;   // { rowId, colKey, colName }
+
+  function cellLink(row, col) {
+    if (col.kind !== 'text' && col.kind !== 'textarea') return null;
+    var v = row.data ? row.data[col.key + '__link'] : null;
+    if (!v) return null;
+    v = String(v);
+    return /^(https?:|mailto:|tel:)/i.test(v) ? v : null;
+  }
+
+  // "coolautomation.com" is fine — https:// is assumed. Anything that is not
+  // a web, mail or phone link is rejected so a cell can never run script.
+  function normalizeLink(s) {
+    s = String(s || '').trim();
+    if (!s) return '';
+    if (/^(https?:\/\/|mailto:|tel:)/i.test(s)) return s;
+    if (/^[\w.-]+\.[a-z]{2,}([\/?#:].*)?$/i.test(s)) return 'https://' + s;
+    return null;
+  }
+
+  function closeCellMenu() {
+    var m = $('cell-menu');
+    if (m.classList.contains('hidden')) return false;
+    m.classList.add('hidden');
+    return true;
+  }
+
+  function menuItem(label, fn) {
+    var b = el('button', null, label);
+    b.type = 'button';
+    b.addEventListener('click', function () { closeCellMenu(); fn(); });
+    return b;
+  }
+
+  function openCellMenu(ev, row, col) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    var link = cellLink(row, col);
+    var canEdit = canEditCurrentTab();
+    if (!link && !canEdit) return;
+    var m = $('cell-menu');
+    m.replaceChildren();
+    if (link) m.appendChild(menuItem('Open link', function () {
+      window.open(link, '_blank', 'noopener');
+    }));
+    if (canEdit) {
+      m.appendChild(menuItem(link ? 'Edit link…' : 'Add link…', function () {
+        openLinkModal(row, col);
+      }));
+      if (link) m.appendChild(menuItem('Remove link', function () {
+        saveCellLink(row.id, col.key, '', col.name);
+      }));
+    }
+    m.classList.remove('hidden');
+    m.style.left = Math.max(4, Math.min(ev.clientX, window.innerWidth - m.offsetWidth - 8)) + 'px';
+    m.style.top = Math.max(4, Math.min(ev.clientY, window.innerHeight - m.offsetHeight - 8)) + 'px';
+  }
+
+  function openLinkModal(row, col) {
+    linkModal = { rowId: row.id, colKey: col.key, colName: col.name };
+    var text = sheetValue(row, col);
+    $('link-cell-text').textContent = col.name + (text ? ': ' + text : ' (empty cell)');
+    $('link-url').value = cellLink(row, col) || '';
+    $('link-error').classList.add('hidden');
+    $('btn-link-remove').classList.toggle('hidden', !cellLink(row, col));
+    $('link-backdrop').classList.remove('hidden');
+    $('link-url').focus();
+  }
+
+  function closeLinkModal() {
+    linkModal = null;
+    $('link-backdrop').classList.add('hidden');
+  }
+
+  // Writes one cell's link with the usual optimistic lock, keeping every
+  // other key in the row's data untouched.
+  async function saveCellLink(rowId, colKey, url, colName) {
+    var row = state.sheetRows.find(function (r) { return r.id === rowId; });
+    if (!row) { toast('That row is no longer loaded.', 'warn', 4000); return; }
+    var data = Object.assign({}, row.data || {});
+    if (url) data[colKey + '__link'] = url; else delete data[colKey + '__link'];
+    var upd = await sb.from('sheet_rows').update({ data: data })
+      .eq('id', rowId).eq('version', row.version).select(SHEET_ROW_SELECT);
+    if (upd.error) { toast('Could not save the link: ' + upd.error.message, 'error', 6000); return; }
+    if (!upd.data || upd.data.length === 0) {
+      toast('This row was just changed by someone else — reloading.', 'warn', 5000);
+      await loadSheetRows(true);
+      return;
+    }
+    var i = state.sheetRows.findIndex(function (r) { return r.id === rowId; });
+    if (i >= 0) state.sheetRows[i] = upd.data[0];
+    renderSheet();
+    toast(url ? 'Link saved on ' + colName : 'Link removed', 'ok');
+  }
+
+  async function onLinkSave() {
+    if (!linkModal) return;
+    var url = normalizeLink($('link-url').value);
+    if (url === null) {
+      var e = $('link-error');
+      e.textContent = 'That does not look like a link. Use https://…, mailto:… or tel:…';
+      e.classList.remove('hidden');
+      return;
+    }
+    var lm = linkModal;
+    closeLinkModal();
+    await saveCellLink(lm.rowId, lm.colKey, url, lm.colName);
+  }
+
   // ---------- sheet row editor ----------
 
   var rowModal = null; // { mode, id, version }
@@ -2094,26 +2255,52 @@
       }
       input.id = rowFieldId(c);
       lab.appendChild(input);
+      if (c.kind === 'text' || c.kind === 'textarea') {
+        var linkVal = (row && row.data) ? String(row.data[c.key + '__link'] || '') : '';
+        var linkIn = document.createElement('input');
+        linkIn.type = 'text';
+        linkIn.id = rowFieldId(c) + '-link';
+        linkIn.className = 'row-link-input' + (linkVal ? '' : ' hidden');
+        linkIn.placeholder = 'Link (https://…) — optional';
+        linkIn.autocomplete = 'off';
+        linkIn.spellcheck = false;
+        linkIn.value = linkVal;
+        var lt = el('button', 'link-toggle' + (linkVal ? ' on' : ''), '\uD83D\uDD17');
+        lt.type = 'button';
+        lt.title = 'Attach a link to this cell';
+        lt.addEventListener('click', function (ev) {
+          ev.preventDefault();
+          linkIn.classList.toggle('hidden');
+          if (!linkIn.classList.contains('hidden')) linkIn.focus();
+        });
+        lab.querySelector('span').appendChild(lt);
+        lab.appendChild(linkIn);
+      }
       wrap.appendChild(lab);
     });
   }
 
   function collectRowData() {
-    var data = {};
+    // Start from the row's existing data so cell links and the values of
+    // deleted columns survive a save instead of being silently dropped.
+    var data = Object.assign({}, (rowModal && rowModal.origData) || {});
+    collectRowData.badLink = null;
     state.sheetCols.forEach(function (c) {
       var input = $(rowFieldId(c));
       if (!input) return;
       if (c.kind === 'checkbox') { data[c.key] = !!input.checked; return; }
-      if (c.kind === 'autonumber') {
-        // never typed by hand: keep what the row has; the database assigns
-        // the next number when a new row is inserted
-        var kept = rowModal && rowModal.origData ? rowModal.origData[c.key] : null;
-        if (kept !== null && kept !== undefined) data[c.key] = kept;
-        return;
-      }
+      if (c.kind === 'autonumber') return;   // already in the clone; the db assigns new ones
       var val = input.value;
-      if (val === '') { data[c.key] = null; return; }
-      data[c.key] = c.kind === 'number' ? Number(val) : val;
+      data[c.key] = val === '' ? null : (c.kind === 'number' ? Number(val) : val);
+      if (c.kind === 'text' || c.kind === 'textarea') {
+        var li = $(rowFieldId(c) + '-link');
+        if (li) {
+          var norm = normalizeLink(li.value);
+          if (norm === null) collectRowData.badLink = c.name;
+          else if (norm) data[c.key + '__link'] = norm;
+          else delete data[c.key + '__link'];
+        }
+      }
     });
     return data;
   }
@@ -2162,6 +2349,11 @@
     setRowError(null);
     try {
       var data = collectRowData();
+      if (collectRowData.badLink) {
+        setRowError('The link on "' + collectRowData.badLink +
+          '" does not look valid. Use https://…, mailto:… or tel:…');
+        return;
+      }
       if (rowModal.mode === 'create') {
         var maxPos = state.sheetRows.reduce(function (m, r) { return Math.max(m, r.position || 0); },
           state.sheetTotal - 1);
@@ -2245,7 +2437,9 @@
     });
     document.addEventListener('keydown', function (e) {
       if (e.key === 'Escape') {
-        if (closeAllPanels()) return;              // first Escape closes an open dropdown
+        if (closeCellMenu()) return;               // Escape closes the cell menu first
+        if (closeAllPanels()) return;              // then an open dropdown
+        if (linkModal) { closeLinkModal(); return; }
         if (catModal.open) { closeCatModal(); return; }
         if (adminModal.open) { closeAdminModal(); return; }
         if (tabModal.open) { closeTabModal(); return; }
@@ -2330,6 +2524,23 @@
     });
 
     $('btn-new-row').addEventListener('click', function () { openRowModal('create', null); });
+    $('btn-link-save').addEventListener('click', onLinkSave);
+    $('btn-link-cancel').addEventListener('click', closeLinkModal);
+    $('btn-link-remove').addEventListener('click', function () {
+      var lm = linkModal;
+      closeLinkModal();
+      if (lm) saveCellLink(lm.rowId, lm.colKey, '', lm.colName);
+    });
+    $('link-url').addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); onLinkSave(); }
+    });
+    $('link-backdrop').addEventListener('mousedown', function (e) {
+      if (e.target === e.currentTarget) closeLinkModal();
+    });
+    document.addEventListener('mousedown', function (e) {
+      if (!e.target.closest || !e.target.closest('#cell-menu')) closeCellMenu();
+    });
+    document.addEventListener('scroll', function () { closeCellMenu(); }, true);
     $('row-form').addEventListener('submit', saveRow);
     $('btn-row-cancel').addEventListener('click', closeRowModal);
     $('btn-row-delete').addEventListener('click', deleteRow);
