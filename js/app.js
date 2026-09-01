@@ -354,6 +354,7 @@
         state.searchCols = null;
         state.hits = [];
         state.hitIndex = 0;
+        clearHistory();
         $('btn-searchcols').textContent = 'All columns';
         state.sortDir = loadSortDir();
         $('sheet-sortdir').value = state.sortDir;
@@ -2938,7 +2939,7 @@
       }
     }
     if (changes.size === 0) return;
-    var ok = await applyCellChanges(Array.from(changes.values()));
+    var ok = await applyCellChanges(Array.from(changes.values()), 'fill');
     if (ok) {
       cellSel = {
         a: { r: Math.min(d.r1, t.r1), c: Math.min(d.c1, t.c1) },
@@ -3021,11 +3022,13 @@
   }
 
   // One optimistic-lock update per touched row; other keys stay untouched.
-  async function applyCellChanges(changes) {
+  async function applyCellChanges(changes, label) {
     var blocked = 0;
+    var hist = [];
     for (var i = 0; i < changes.length; i++) {
       var ch = changes[i];
       var cur = state.sheetRows.find(function (r) { return r.id === ch.row.id; }) || ch.row;
+      var before = Object.assign({}, cur.data || {});
       var data = Object.assign({}, cur.data || {});
       Object.keys(ch.patch).forEach(function (k) { data[k] = ch.patch[k]; });
       var upd = await sb.from('sheet_rows').update({ data: data })
@@ -3035,7 +3038,9 @@
       var j = state.sheetRows.findIndex(function (r) { return r.id === cur.id; });
       if (j >= 0) state.sheetRows[j] = upd.data[0];
       updateRowDom(upd.data[0]);
+      hist.push({ kind: 'data', rowId: cur.id, before: before, after: data });
     }
+    if (label) recordAction(label, hist);
     if (blocked > 0) {
       toast(blocked + ' row(s) were just changed by someone else — reloading.', 'warn', 5000);
       await loadSheetRows(true);
@@ -3086,7 +3091,7 @@
       if (skipped) toast('Nothing fitted those columns.', 'warn', 4000);
       return;
     }
-    var ok = await applyCellChanges(Array.from(changes.values()));
+    var ok = await applyCellChanges(Array.from(changes.values()), 'paste');
     if (ok) {
       cellSel = { a: { r: rect.r1, c: rect.c1 }, b: { r: rect.r2, c: rect.c2 } };
       flashSelection = true;
@@ -3114,10 +3119,115 @@
       }
     }
     if (changes.size === 0) return;
-    var ok = await applyCellChanges(Array.from(changes.values()));
+    var ok = await applyCellChanges(Array.from(changes.values()), 'clearing cells');
     if (ok) {
       flashSelection = true;
       applyCellSelection();
+    }
+  }
+
+  // ---------- undo / redo (this session's own sheet actions) ----------
+
+  var undoStack = [];
+  var redoStack = [];
+  var historyBusy = false;
+
+  function updateUndoButtons() {
+    $('btn-undo').disabled = undoStack.length === 0;
+    $('btn-redo').disabled = redoStack.length === 0;
+  }
+
+  function clearHistory() {
+    undoStack.length = 0;
+    redoStack.length = 0;
+    updateUndoButtons();
+  }
+
+  function recordAction(label, items) {
+    if (!items || items.length === 0) return;
+    undoStack.push({ label: label, items: items });
+    if (undoStack.length > 60) undoStack.shift();
+    redoStack.length = 0;
+    updateUndoButtons();
+  }
+
+  // The inverse operations. They bypass history recording on purpose and
+  // reuse the usual optimistic-lock update paths.
+  async function histSetData(rowId, data) {
+    var cur = state.sheetRows.find(function (r) { return r.id === rowId; });
+    if (!cur) return false;
+    var upd = await sb.from('sheet_rows').update({ data: data })
+      .eq('id', rowId).eq('version', cur.version).select(SHEET_ROW_SELECT);
+    if (upd.error || !upd.data || upd.data.length === 0) return false;
+    var i = state.sheetRows.findIndex(function (r) { return r.id === rowId; });
+    if (i >= 0) state.sheetRows[i] = upd.data[0];
+    updateRowDom(upd.data[0]);
+    return true;
+  }
+
+  async function histInsert(row) {
+    var ins = await sb.from('sheet_rows')
+      .insert({ id: row.id, tab_id: row.tab_id, position: row.position, data: row.data })
+      .select(SHEET_ROW_SELECT).single();
+    if (ins.error) return false;
+    state.sheetRows.push(ins.data);
+    sortLoadedRows();
+    state.sheetTotal += 1;
+    requestRender();
+    return true;
+  }
+
+  async function histDelete(rowId) {
+    var res = await sb.from('sheet_rows').delete().eq('id', rowId).select('id');
+    if (res.error) return false;
+    state.sheetRows = state.sheetRows.filter(function (r) { return r.id !== rowId; });
+    state.sheetTotal = Math.max(0, state.sheetTotal - 1);
+    requestRender();
+    return true;
+  }
+
+  async function histSetPos(rowId, pos) {
+    var cur = state.sheetRows.find(function (r) { return r.id === rowId; });
+    if (!cur) return false;
+    var upd = await sb.from('sheet_rows').update({ position: pos })
+      .eq('id', rowId).eq('version', cur.version).select(SHEET_ROW_SELECT);
+    if (upd.error || !upd.data || upd.data.length === 0) return false;
+    var i = state.sheetRows.findIndex(function (r) { return r.id === rowId; });
+    if (i >= 0) state.sheetRows[i] = upd.data[0];
+    sortLoadedRows();
+    requestRender();
+    return true;
+  }
+
+  async function doUndoRedo(dir) {
+    if (historyBusy || !canEditCurrentTab()) return;
+    var from = dir === 'undo' ? undoStack : redoStack;
+    var to = dir === 'undo' ? redoStack : undoStack;
+    var entry = from.pop();
+    updateUndoButtons();
+    if (!entry) return;
+    historyBusy = true;
+    try {
+      var items = dir === 'undo' ? entry.items.slice().reverse() : entry.items;
+      for (var k = 0; k < items.length; k++) {
+        var it = items[k];
+        var ok = false;
+        if (it.kind === 'data') ok = await histSetData(it.rowId, dir === 'undo' ? it.before : it.after);
+        else if (it.kind === 'insert') ok = dir === 'undo' ? await histDelete(it.row.id) : await histInsert(it.row);
+        else if (it.kind === 'delete') ok = dir === 'undo' ? await histInsert(it.row) : await histDelete(it.row.id);
+        else if (it.kind === 'pos') ok = await histSetPos(it.rowId, dir === 'undo' ? it.before : it.after);
+        if (!ok) {
+          toast('Could not ' + dir + ' — the sheet was changed elsewhere, so the history was cleared.', 'warn', 5500);
+          clearHistory();
+          await loadSheetRows(true);
+          return;
+        }
+      }
+      to.push(entry);
+      updateUndoButtons();
+      toast((dir === 'undo' ? 'Undid: ' : 'Redid: ') + entry.label, 'ok', 2200);
+    } finally {
+      historyBusy = false;
     }
   }
 
@@ -3173,6 +3283,7 @@
     state.sheetRows.push(ins.data);
     sortLoadedRows();
     state.sheetTotal += 1;
+    recordAction('adding a row', [{ kind: 'insert', row: ins.data }]);
     requestRender();
     toast('Empty row added — double-click its cells to fill it in', 'ok', 4000);
   }
@@ -3223,6 +3334,8 @@
       }
       var i = state.sheetRows.findIndex(function (r) { return r.id === cur.id; });
       if (i >= 0) state.sheetRows[i] = upd.data[0];
+      recordAction('moving a row', [{ kind: 'pos', rowId: cur.id,
+        before: Number(cur.position), after: pos }]);
       rowClipboard = null;
       state.flashRowId = cur.id;
       window.setTimeout(function () { state.flashRowId = null; }, 2000);
@@ -3239,6 +3352,7 @@
       if (ins.error) { toast('Could not paste the row: ' + ins.error.message, 'error', 6000); return; }
       state.sheetRows.push(ins.data);
       state.sheetTotal += 1;
+      recordAction('pasting a row', [{ kind: 'insert', row: ins.data }]);
       state.flashRowId = ins.data.id;
       window.setTimeout(function () { state.flashRowId = null; }, 2000);
       toast('Row pasted', 'ok');
@@ -3305,6 +3419,8 @@
     state.sheetRows = state.sheetRows.concat(ins.data || []);
     sortLoadedRows();
     state.sheetTotal += (ins.data || []).length;
+    recordAction('adding ' + (ins.data || []).length + ' rows',
+      (ins.data || []).map(function (r) { return { kind: 'insert', row: r }; }));
     requestRender();
     toast(count + ' empty rows added — double-click their cells to fill them in', 'ok', 4500);
   }
@@ -3319,6 +3435,8 @@
     }
     state.sheetRows = state.sheetRows.filter(function (r) { return r.id !== row.id; });
     state.sheetTotal = Math.max(0, state.sheetTotal - 1);
+    recordAction('deleting a row', [{ kind: 'delete',
+      row: { id: row.id, tab_id: row.tab_id, position: row.position, data: row.data } }]);
     requestRender();
     toast('Row deleted', 'ok');
   }
@@ -3407,6 +3525,8 @@
     }
     var i = state.sheetRows.findIndex(function (r) { return r.id === cur.id; });
     if (i >= 0) state.sheetRows[i] = upd.data[0];
+    recordAction('moving a row', [{ kind: 'pos', rowId: cur.id,
+      before: Number(cur.position), after: newPos }]);
     sortLoadedRows();
     requestRender();
     toast('Row moved', 'ok');
@@ -3558,6 +3678,8 @@
     }
     var i = state.sheetRows.findIndex(function (r) { return r.id === cur.id; });
     if (i >= 0) state.sheetRows[i] = upd.data[0];
+    recordAction('cell edit', [{ kind: 'data', rowId: cur.id,
+      before: Object.assign({}, cur.data || {}), after: data }]);
     updateRowDom(upd.data[0]);
   }
 
@@ -3687,6 +3809,8 @@
     }
     var i = state.sheetRows.findIndex(function (r) { return r.id === rowId; });
     if (i >= 0) state.sheetRows[i] = upd.data[0];
+    recordAction(url ? 'link change' : 'link removal', [{ kind: 'data', rowId: rowId,
+      before: Object.assign({}, row.data || {}), after: data }]);
     updateRowDom(upd.data[0]);
     toast(url ? 'Link saved on ' + colName : 'Link removed', 'ok');
   }
@@ -3899,6 +4023,7 @@
         state.sheetRows.push(ins.data);
         sortLoadedRows();
         state.sheetTotal += 1;
+        recordAction('adding a row', [{ kind: 'insert', row: ins.data }]);
         closeRowModal();
         requestRender();
         toast('Row added', 'ok');
@@ -3911,6 +4036,8 @@
       if (upd.data && upd.data.length > 0) {
         var i = state.sheetRows.findIndex(function (r) { return r.id === rowModal.id; });
         if (i >= 0) state.sheetRows[i] = upd.data[0];
+        recordAction('editing a row', [{ kind: 'data', rowId: rowModal.id,
+          before: Object.assign({}, rowModal.origData || {}), after: data }]);
         closeRowModal();
         updateRowDom(upd.data[0]);
         toast('Saved', 'ok');
@@ -3947,10 +4074,13 @@
     if (!rowModal || rowModal.mode !== 'edit') return;
     if (!window.confirm('Delete this row? This removes it for everyone who can see this tab.')) return;
     try {
+      var gone = state.sheetRows.find(function (r) { return r.id === rowModal.id; });
       var res = await sb.from('sheet_rows').delete().eq('id', rowModal.id).select('id');
       if (res.error) throw res.error;
       state.sheetRows = state.sheetRows.filter(function (r) { return r.id !== rowModal.id; });
       state.sheetTotal = Math.max(0, state.sheetTotal - 1);
+      if (gone) recordAction('deleting a row', [{ kind: 'delete',
+        row: { id: gone.id, tab_id: gone.tab_id, position: gone.position, data: gone.data } }]);
       closeRowModal();
       requestRender();
       toast('Row deleted', 'ok');
@@ -4238,6 +4368,20 @@
     window.addEventListener('scroll', scheduleScrollSave);
     window.addEventListener('beforeunload', saveScrollState);
     $('btn-colvis').addEventListener('click', toggleColVisPanel);
+    $('btn-undo').addEventListener('click', function () { doUndoRedo('undo'); });
+    $('btn-redo').addEventListener('click', function () { doUndoRedo('redo'); });
+    document.addEventListener('keydown', function (e) {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+      var key = e.key.toLowerCase();
+      if (key !== 'z' && key !== 'y') return;
+      var a = document.activeElement;
+      if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.tagName === 'SELECT')) return;
+      if (rowModal || state.modal || linkModal || tabModal.open || catModal.open || adminModal.open) return;
+      var tab = currentTab();
+      if (!tab || tab.kind !== 'sheet') return;
+      e.preventDefault();
+      doUndoRedo((key === 'y' || e.shiftKey) ? 'redo' : 'undo');
+    });
     $('btn-searchcols').addEventListener('click', toggleSearchColsPanel);
     $('btn-hit-prev').addEventListener('click', function () { goToHit(-1); });
     $('btn-hit-next').addEventListener('click', function () { goToHit(1); });

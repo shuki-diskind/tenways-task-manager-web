@@ -6,16 +6,16 @@
         content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src https: wss:; base-uri 'none'; form-action 'none'" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#4f46e5" />
-  <link rel="manifest" href="manifest.webmanifest?v=1.11.17" />
+  <link rel="manifest" href="manifest.webmanifest?v=1.11.18" />
   <link rel="icon" href="icons/icon-192.png" />
   <link rel="apple-touch-icon" href="icons/icon-180.png" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="TENWAYS Tasks" />
-  <meta name="app-version" content="1.11.17" />
+  <meta name="app-version" content="1.11.18" />
   <title>TENWAYS Task Manager</title>
-  <link rel="stylesheet" href="styles.css?v=1.11.17" />
+  <link rel="stylesheet" href="styles.css?v=1.11.18" />
 </head>
 <body>
 
@@ -145,6 +145,8 @@
       <div id="sheet-view" class="hidden">
         <div class="toolbar">
           <button class="btn primary" id="btn-new-row">&#65291; New row</button>
+          <button class="btn ghost btn-small" id="btn-undo" disabled title="Undo (Ctrl+Z)">&#8630; Undo</button>
+          <button class="btn ghost btn-small" id="btn-redo" disabled title="Redo (Ctrl+Y)">&#8631; Redo</button>
           <input type="search" id="sheet-search" placeholder="Search this sheet&hellip;" />
           <div class="colvis searchcols">
             <button class="btn ghost" id="btn-searchcols" title="Choose which columns the search looks in">All columns</button>
@@ -466,10 +468,10 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="vendor/supabase.js?v=1.11.17"></script>
-  <script src="config.js?v=1.11.17"></script>
-  <script src="js/client.js?v=1.11.17"></script>
-  <script src="js/app.js?v=1.11.17"></script>
-  <script src="js/auth.js?v=1.11.17"></script>
+  <script src="vendor/supabase.js?v=1.11.18"></script>
+  <script src="config.js?v=1.11.18"></script>
+  <script src="js/client.js?v=1.11.18"></script>
+  <script src="js/app.js?v=1.11.18"></script>
+  <script src="js/auth.js?v=1.11.18"></script>
 </body>
 </html>
