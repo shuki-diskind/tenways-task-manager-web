@@ -899,6 +899,21 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 }
 th.sheet-gutter { z-index: 3; }
 
+/* 📎 marker for rows that carry attachments (gutter is sticky = positioned) */
+.row-clip {
+  position: absolute;
+  right: 1px;
+  top: 0;
+  font-size: 9px;
+  line-height: 1.2;
+  opacity: .8;
+  pointer-events: none;
+}
+
+/* arrow-key navigation: keep the focused cell clear of the sticky
+   header and the frozen row-number gutter when it scrolls into view */
+#sheet-body td { scroll-margin-top: 34px; scroll-margin-left: 70px; }
+
 /* generic row colours driven by a Coloured dropdown column */
 #sheet-body tr.rc-green td { background: rgba(34, 197, 94, 0.14); }
 #sheet-body tr.rc-yellow td { background: rgba(250, 204, 21, 0.18); }

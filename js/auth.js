@@ -11,8 +11,16 @@
     console.log('[auth] view -> ' + id);
   }
 
-  var mode = 'signin'; // or 'signup'
+  var mode = 'signin'; // or 'signup' / 'recovery'
   var knownUserId = null;
+
+  // Where "reset my password" emails send people: always the web app —
+  // the desktop app cannot receive links, and the web app shares the
+  // same accounts. Captured from the URL hash BEFORE supabase-js
+  // consumes it, so a reset link lands on the new-password form.
+  var RESET_LANDING = 'https://shuki-diskind.github.io/tenways-task-manager-web/';
+  var pendingRecovery = /type=recovery/.test(window.location.hash || '');
+  var recoveryUser = null;
 
   function setError(msg) {
     var e = $('auth-error');
@@ -28,16 +36,41 @@
 
   function applyMode() {
     $('field-name').classList.toggle('hidden', mode !== 'signup');
-    $('auth-submit').textContent = mode === 'signup' ? 'Create account' : 'Sign in';
+    $('field-email').classList.toggle('hidden', mode === 'recovery');
+    $('forgot-line').classList.toggle('hidden', mode !== 'signin');
+    $('ask-admin-line').classList.toggle('hidden', mode === 'recovery');
+    $('password-label').textContent = mode === 'recovery' ? 'New password' : 'Password';
+    $('auth-submit').textContent = mode === 'signup' ? 'Create account'
+      : mode === 'recovery' ? 'Set new password' : 'Sign in';
     $('auth-subtitle').textContent = mode === 'signup'
       ? 'Create your team account'
+      : mode === 'recovery'
+      ? 'Choose a new password for your account'
       : 'Sign in with your team email';
     $('auth-toggle').textContent = mode === 'signup'
       ? 'Already have an account? Sign in'
       : 'New here? Create an account';
-    $('auth-password').setAttribute('autocomplete', mode === 'signup' ? 'new-password' : 'current-password');
+    $('auth-password').setAttribute('autocomplete', mode === 'signin' ? 'current-password' : 'new-password');
     setError(null);
     setInfo(null);
+  }
+
+  async function onForgot(e) {
+    e.preventDefault();
+    var email = $('auth-email').value.trim();
+    setError(null);
+    setInfo(null);
+    if (!email || email.indexOf('@') < 0) {
+      setError('Type your email address above first, then press "Forgot your password?" again.');
+      return;
+    }
+    try {
+      var res = await sb.auth.resetPasswordForEmail(email, { redirectTo: RESET_LANDING });
+      if (res.error) throw res.error;
+      setInfo('Password reset email sent to ' + email + ' — open the link inside and you can choose a new password. (Check spam if it does not arrive.)');
+    } catch (err) {
+      setError(friendlyAuthError(err));
+    }
   }
 
   function friendlyAuthError(err) {
@@ -52,6 +85,12 @@
     if (/Signups not allowed|signup_disabled/i.test(m)) {
       return 'Sign-ups are switched off for this project. Ask the project owner to re-enable them for you.';
     }
+    if (/rate limit/i.test(m)) {
+      return 'Too many emails were requested just now — wait a few minutes and try again.';
+    }
+    if (/same.*password|different from the old/i.test(m)) {
+      return 'That is already your current password — choose a different one.';
+    }
     return m;
   }
 
@@ -63,9 +102,9 @@
     setError(null);
     setInfo(null);
 
-    if (!email || email.indexOf('@') < 0) { setError('Enter a valid email address.'); return; }
+    if (mode !== 'recovery' && (!email || email.indexOf('@') < 0)) { setError('Enter a valid email address.'); return; }
     if (!password) { setError('Enter your password.'); return; }
-    if (mode === 'signup' && password.length < 8) {
+    if ((mode === 'signup' || mode === 'recovery') && password.length < 8) {
       setError('Choose a password of at least 8 characters.');
       return;
     }
@@ -73,6 +112,19 @@
     var btn = $('auth-submit');
     btn.disabled = true;
     try {
+      if (mode === 'recovery') {
+        var up = await sb.auth.updateUser({ password: password });
+        if (up.error) throw up.error;
+        pendingRecovery = false;
+        var u = (up.data && up.data.user) || recoveryUser;
+        mode = 'signin';
+        $('auth-password').value = '';
+        applyMode();
+        knownUserId = u ? u.id : knownUserId;
+        showView('view-app');
+        window.todoApp.start(u);
+        return;
+      }
       if (mode === 'signup') {
         var su = await sb.auth.signUp({
           email: email,
@@ -115,6 +167,7 @@
     }
 
     $('auth-form').addEventListener('submit', onSubmit);
+    $('auth-forgot').addEventListener('click', onForgot);
     $('auth-toggle').addEventListener('click', function (e) {
       e.preventDefault();
       mode = mode === 'signin' ? 'signup' : 'signin';
@@ -131,7 +184,19 @@
     // Supabase calls inside it can deadlock.
     sb.auth.onAuthStateChange(function (event, session) {
       console.log('[auth] event: ' + event + (session ? ' (session)' : ' (no session)'));
+      if (event === 'PASSWORD_RECOVERY') pendingRecovery = true;
       var uid = session && session.user ? session.user.id : null;
+      if (uid && pendingRecovery) {
+        // Arrived via a password-reset email: ask for the new password
+        // before letting the session into the app.
+        recoveryUser = session.user;
+        setTimeout(function () {
+          mode = 'recovery';
+          applyMode();
+          showView('view-auth');
+        }, 0);
+        return;
+      }
       if (uid && uid !== knownUserId) {
         knownUserId = uid;
         var user = session.user;

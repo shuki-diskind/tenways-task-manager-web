@@ -6,16 +6,16 @@
         content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src https: wss:; base-uri 'none'; form-action 'none'" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#4f46e5" />
-  <link rel="manifest" href="manifest.webmanifest?v=1.11.19" />
+  <link rel="manifest" href="manifest.webmanifest?v=1.11.20" />
   <link rel="icon" href="icons/icon-192.png" />
   <link rel="apple-touch-icon" href="icons/icon-180.png" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="TENWAYS Tasks" />
-  <meta name="app-version" content="1.11.19" />
+  <meta name="app-version" content="1.11.20" />
   <title>TENWAYS Task Manager</title>
-  <link rel="stylesheet" href="styles.css?v=1.11.19" />
+  <link rel="stylesheet" href="styles.css?v=1.11.20" />
 </head>
 <body>
 
@@ -51,12 +51,12 @@
           <span>Display name</span>
           <input type="text" id="auth-name" placeholder="How teammates will see you" maxlength="40" autocomplete="name" />
         </label>
-        <label class="field">
+        <label class="field" id="field-email">
           <span>Email</span>
           <input type="email" id="auth-email" placeholder="you@company.com" autocomplete="username" />
         </label>
-        <label class="field">
-          <span>Password</span>
+        <label class="field" id="field-password">
+          <span id="password-label">Password</span>
           <input type="password" id="auth-password" autocomplete="current-password" />
         </label>
         <div id="auth-error" class="form-error hidden"></div>
@@ -69,7 +69,10 @@
       <p class="small toggle-line hidden">
         <a href="#" id="auth-toggle">New here? Create an account</a>
       </p>
-      <p class="small muted toggle-line">Need an account? Ask a TENWAYS admin to add you.</p>
+      <p class="small toggle-line" id="forgot-line">
+        <a href="#" id="auth-forgot">Forgot your password?</a>
+      </p>
+      <p class="small muted toggle-line" id="ask-admin-line">Need an account? Ask a TENWAYS admin to add you.</p>
     </div>
   </div>
 
@@ -468,10 +471,10 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="vendor/supabase.js?v=1.11.19"></script>
-  <script src="config.js?v=1.11.19"></script>
-  <script src="js/client.js?v=1.11.19"></script>
-  <script src="js/app.js?v=1.11.19"></script>
-  <script src="js/auth.js?v=1.11.19"></script>
+  <script src="vendor/supabase.js?v=1.11.20"></script>
+  <script src="config.js?v=1.11.20"></script>
+  <script src="js/client.js?v=1.11.20"></script>
+  <script src="js/app.js?v=1.11.20"></script>
+  <script src="js/auth.js?v=1.11.20"></script>
 </body>
 </html>

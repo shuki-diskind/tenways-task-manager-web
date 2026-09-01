@@ -110,6 +110,7 @@
     renderQueued: false, // a coalesced repaint is already scheduled
     hitIndex: 0,        // which hit prev/next is standing on
     flashRowId: null,   // row to flash after a paste/move
+    attachRows: null,   // Set of row ids that have at least one attachment
     renderedRows: [],   // the rows renderSheet last displayed, in order
     restorePending: false, // restore the saved scroll spot after next render
     fullSheet: false,   // desktop: every row of the sheet is in memory
@@ -308,6 +309,62 @@
     }
   }
 
+  // Storage folders are named by row/record id, so one cheap root listing
+  // tells us which loaded rows carry attachments (for the 📎 marker).
+  // The listing honours storage RLS, so it only ever names visible rows.
+  async function loadAttachmentMarkers() {
+    var res = await sb.storage.from('attachments').list('', { limit: 10000 });
+    if (res.error || !res.data) return;
+    var s = new Set();
+    res.data.forEach(function (f) { if (!f.id) s.add(f.name); }); // folders have no id
+    state.attachRows = s;
+    requestRender();
+  }
+
+  // From a search result to the same row in the full sheet: clear the
+  // search, page the sheet in (bigger pages, newest-first as always)
+  // until the row is loaded, then scroll to it, select it and flash it.
+  var jumpBusy = false;
+  async function jumpToRow(target) {
+    if (jumpBusy) return;
+    jumpBusy = true;
+    var targetId = target.id;
+    toast('Taking you to that row…', 'ok', 2500);
+    var normalPage = SHEET_PAGE;
+    SHEET_PAGE = 1000;   // the RPC's cap — fewest round-trips
+    try {
+      $('sheet-search').value = '';
+      state.hitIndex = 0;
+      await loadSheetRows(true);
+      var guard = 0;
+      while (!state.sheetRows.some(function (r) { return r.id === targetId; }) &&
+             state.sheetRows.length < state.sheetTotal && guard++ < 40) {
+        await loadSheetRows(false);
+      }
+    } finally {
+      SHEET_PAGE = normalPage;
+      jumpBusy = false;
+    }
+    var vi = (state.renderedRows || []).findIndex(function (r) { return r.id === targetId; });
+    if (vi < 0) {
+      toast('That row is no longer in this sheet.', 'warn', 5000);
+      return;
+    }
+    var tr = $('sheet-body').children[vi];
+    if (tr && tr.scrollIntoView) tr.scrollIntoView({ block: 'center' });
+    cellSel = { a: { r: vi, c: 0 }, b: { r: vi, c: 0 } };
+    applyCellSelection();
+    state.flashRowId = targetId;
+    var row = state.sheetRows.find(function (r) { return r.id === targetId; });
+    if (row) updateRowDom(row);
+    window.setTimeout(function () {
+      if (state.flashRowId !== targetId) return;
+      state.flashRowId = null;
+      var cur = state.sheetRows.find(function (r) { return r.id === targetId; });
+      if (cur) updateRowDom(cur);
+    }, 2500);
+  }
+
   var sheetSearchTimer = null;
   function onSheetSearch() {
     clearTimeout(sheetSearchTimer);
@@ -361,6 +418,7 @@
         state.colAutoWidths = {};
         state.todos = [];
         state.categories = [];
+        loadAttachmentMarkers();   // in parallel; repaints when it lands
         await loadSheetRows(true);
       } else {
         var t = tab
@@ -1306,6 +1364,13 @@
       renderAdminUsers();
     });
     head.appendChild(pwBtn);
+    if (p.id !== state.user.id) {
+      var delBtn = el('button', 'btn ghost btn-small danger-text', 'Delete…');
+      delBtn.type = 'button';
+      delBtn.title = 'Permanently delete this user';
+      delBtn.addEventListener('click', function () { deleteUser(p, delBtn); });
+      head.appendChild(delBtn);
+    }
     card.appendChild(head);
 
     if (adminModal.nameEditId === p.id) {
@@ -1448,6 +1513,24 @@
       toast('Password set for ' + p.display_name + ' — tell them the new password.', 'ok', 6000);
     } catch (err) {
       toast('Could not set password: ' + err.message, 'error', 7000);
+      btn.disabled = false;
+    }
+  }
+
+  async function deleteUser(p, btn) {
+    var ok = window.confirm('Permanently delete ' + p.display_name + ' (' + p.email + ')?\n\n' +
+      'They will no longer be able to sign in, and they disappear from all pickers. ' +
+      'Records they created or edited stay exactly as they are.');
+    if (!ok) return;
+    btn.disabled = true;
+    try {
+      var res = await sb.rpc('admin_delete_user', { p_user_id: p.id });
+      if (res.error) throw res.error;
+      state.profiles = state.profiles.filter(function (x) { return x.id !== p.id; });
+      renderAdminUsers();
+      toast(p.display_name + ' was deleted.', 'ok', 5000);
+    } catch (err) {
+      toast('Could not delete: ' + err.message, 'error', 7000);
       btn.disabled = false;
     }
   }
@@ -2208,6 +2291,11 @@
     openBtn.title = 'Open this row';
     gutter.appendChild(openBtn);
     gutter.appendChild(el('span', null, String(index + 1)));
+    if (state.attachRows && state.attachRows.has(row.id)) {
+      var clip = el('span', 'row-clip', '📎');
+      clip.title = 'This row has attachments — open it with the pencil to see them';
+      gutter.appendChild(clip);
+    }
     gutter.title = 'Drag to move this row · right-click to insert rows';
     tr.appendChild(gutter);
     var q0 = state.sheetQuery ? state.sheetQuery.toLowerCase() : null;
@@ -2600,6 +2688,7 @@
       if (res.error) failed.push(f.name + ' (' + res.error.message + ')');
     }
     await rowLoadAttachments();
+    loadAttachmentMarkers();   // refresh the 📎 markers in the grid
     if (failed.length) {
       toast('Could not upload: ' + failed.join('; '), 'error', 8000);
     } else {
@@ -2616,6 +2705,7 @@
     }
     toast('Attachment deleted', 'ok');
     rowLoadAttachments();
+    loadAttachmentMarkers();   // the 📎 disappears if that was the last file
   }
 
   // ---------- smart search: column scope, hit list, navigation ----------
@@ -2806,6 +2896,70 @@
       }, 1400);
     }
     positionFillHandle();
+  }
+
+  // Arrow keys walk the selection like Excel; Shift+arrow stretches it.
+  function moveCellSelection(key, extend) {
+    if (!cellSel) return;
+    var rows = state.renderedRows || [];
+    var cols = visibleSheetCols();
+    if (!rows.length || !cols.length) return;
+    var r = cellSel.b.r, c = cellSel.b.c;
+    if (key === 'ArrowUp') r--;
+    else if (key === 'ArrowDown') r++;
+    else if (key === 'ArrowLeft') c--;
+    else if (key === 'ArrowRight') c++;
+    r = Math.max(0, Math.min(rows.length - 1, r));
+    c = Math.max(0, Math.min(cols.length - 1, c));
+    var np = { r: r, c: c };
+    cellSel = extend ? { a: cellSel.a, b: np } : { a: np, b: np };
+    applyCellSelection();
+    var tr = $('sheet-body').children[r];
+    var td = tr && tr.children[c + 1];
+    if (td && td.scrollIntoView) td.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+
+  // Ctrl+D, Excel-style: the top cell of each selected column fills the
+  // cells below it. A single selected row copies from the row above.
+  async function fillDownSelection() {
+    if (!cellSel) return;
+    var rows = state.renderedRows || [];
+    var cols = visibleSheetCols();
+    var r1 = Math.min(cellSel.a.r, cellSel.b.r), r2 = Math.max(cellSel.a.r, cellSel.b.r);
+    var c1 = Math.min(cellSel.a.c, cellSel.b.c), c2 = Math.max(cellSel.a.c, cellSel.b.c);
+    var changes = new Map();
+    var skippedUnique = false;
+    for (var c = c1; c <= c2; c++) {
+      var col = cols[c];
+      if (!col || col.kind === 'autonumber') continue;
+      if (col.kind === 'uniquenumber') { skippedUnique = true; continue; }
+      var srcR = r1, startR = r1 + 1;
+      if (r1 === r2) {           // single row: duplicate the cell above it
+        if (r1 === 0) continue;
+        srcR = r1 - 1;
+        startR = r1;
+      }
+      var srcRow = rows[srcR];
+      if (!srcRow) continue;
+      var v = (srcRow.data || {})[col.key];
+      if (v === undefined) v = null;
+      var lnk = (srcRow.data || {})[col.key + '__link'];
+      for (var r = startR; r <= r2; r++) {
+        var row = rows[r];
+        if (!row) continue;
+        var ch = changes.get(row.id) || { row: row, patch: {} };
+        ch.patch[col.key] = v;
+        if (lnk) ch.patch[col.key + '__link'] = lnk;
+        changes.set(row.id, ch);
+      }
+    }
+    if (skippedUnique) toast('Unique-number columns were skipped — those values must stay unique.', 'warn', 4000);
+    if (changes.size === 0) return;
+    var ok = await applyCellChanges(Array.from(changes.values()), 'fill down');
+    if (ok) {
+      flashSelection = true;
+      applyCellSelection();
+    }
   }
 
   // ---------- the fill handle: drag to copy / continue a series ----------
@@ -3236,9 +3390,22 @@
   function openRowMenu(ev, row) {
     ev.preventDefault();
     ev.stopPropagation();
-    if (!canEditCurrentTab()) return;
+    if (!canEditCurrentTab()) {
+      // View-only users still get the search jump on the row number
+      if (!state.sheetQuery) return;
+      var mv = $('cell-menu');
+      mv.replaceChildren();
+      mv.appendChild(menuItem('➜ Go to this row in the full sheet', function () { jumpToRow(row); }));
+      mv.classList.remove('hidden');
+      mv.style.left = Math.max(4, Math.min(ev.clientX, window.innerWidth - mv.offsetWidth - 8)) + 'px';
+      mv.style.top = Math.max(4, Math.min(ev.clientY, window.innerHeight - mv.offsetHeight - 8)) + 'px';
+      return;
+    }
     var m = $('cell-menu');
     m.replaceChildren();
+    if (state.sheetQuery) {
+      m.appendChild(menuItem('➜ Go to this row in the full sheet', function () { jumpToRow(row); }));
+    }
     m.appendChild(menuItem('＋ Add row above', function () { insertEmptyRowNear(row, 'above'); }));
     m.appendChild(menuItem('＋ Add row below', function () { insertEmptyRowNear(row, 'below'); }));
     m.appendChild(menuItem('＋ Add several rows…', function () { openMultiRowModal(row); }));
@@ -3739,6 +3906,9 @@
     var canEdit = canEditCurrentTab();
     var m = $('cell-menu');
     m.replaceChildren();
+    if (state.sheetQuery) {
+      m.appendChild(menuItem('➜ Go to this row in the full sheet', function () { jumpToRow(row); }));
+    }
     m.appendChild(menuItem('Copy', function () {
       var tsv = selectionTSV();
       if (tsv == null) return;
@@ -3995,8 +4165,24 @@
   }
 
   function closeRowModal() {
+    var wasId = rowModal && rowModal.mode === 'edit' ? rowModal.id : null;
     rowModal = null;
     $('row-backdrop').classList.add('hidden');
+    if (!wasId || isPhone()) return;
+    // Light the row back up so the reader lands where they were working.
+    var row = state.sheetRows.find(function (r) { return r.id === wasId; });
+    if (!row) return;   // it was just deleted
+    state.flashRowId = wasId;
+    updateRowDom(row);
+    var vi = (state.renderedRows || []).findIndex(function (r) { return r.id === wasId; });
+    var tr = vi >= 0 ? $('sheet-body').children[vi] : null;
+    if (tr && tr.scrollIntoView) tr.scrollIntoView({ block: 'nearest' });
+    window.setTimeout(function () {
+      if (state.flashRowId !== wasId) return;   // a newer flash took over
+      state.flashRowId = null;
+      var cur = state.sheetRows.find(function (r) { return r.id === wasId; });
+      if (cur) updateRowDom(cur);
+    }, 2500);
   }
 
   async function saveRow(e) {
@@ -4260,6 +4446,17 @@
       var el2 = document.activeElement;
       if (el2 && (el2.tagName === 'INPUT' || el2.tagName === 'TEXTAREA' || el2.tagName === 'SELECT')) return;
       if (rowModal || state.modal || linkModal || tabModal.open || catModal.open || adminModal.open) return;
+      if (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        if (e.ctrlKey || e.metaKey || e.altKey) return;   // browser shortcuts stay theirs
+        e.preventDefault();                               // …and the pane must not scroll
+        moveCellSelection(e.key, e.shiftKey);
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'd' || e.key === 'D')) {
+        e.preventDefault();   // Ctrl+D bookmarks the page otherwise
+        if (canEditCurrentTab()) fillDownSelection();
+        return;
+      }
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       if (!canEditCurrentTab()) return;
       if (e.key === 'Delete' || e.key === 'Backspace') {
