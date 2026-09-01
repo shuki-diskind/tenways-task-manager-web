@@ -300,7 +300,7 @@
     // In newest-at-bottom mode older pages appear ABOVE the current view;
     // keep the reader anchored on the rows they were looking at.
     var wrapEl = document.querySelector('#sheet-view .table-wrap');
-    var preH = (!reset && state.sortDir === 'asc' && wrapEl) ? wrapEl.scrollHeight : null;
+    var preH = (!reset && state.sortDir === 'asc' && wrapEl && !jumpBusy) ? wrapEl.scrollHeight : null;
     renderSheet();
     if (preH !== null) {
       window.setTimeout(function () {
@@ -319,6 +319,46 @@
     res.data.forEach(function (f) { if (!f.id) s.add(f.name); }); // folders have no id
     state.attachRows = s;
     requestRender();
+  }
+
+  // The 📎 button: a small window listing the row's files; click one to
+  // open it. Adding / renaming / deleting stays in the ✎ row editor.
+  async function openAttachList(row) {
+    var box = $('attachlist-items');
+    var cols = visibleSheetCols();
+    var label = cols.length ? sheetValue(row, cols[0]) : '';
+    $('attachlist-sub').textContent = label || 'This row';
+    box.replaceChildren(el('div', 'muted small', 'Loading…'));
+    $('attachlist-backdrop').classList.remove('hidden');
+    var res = await sb.storage.from('attachments')
+      .list(row.id, { limit: 100, sortBy: { column: 'name', order: 'asc' } });
+    if ($('attachlist-backdrop').classList.contains('hidden')) return; // closed meanwhile
+    if (res.error) {
+      box.replaceChildren(el('div', 'form-error', 'Could not load the list: ' + res.error.message));
+      return;
+    }
+    var files = res.data || [];
+    box.replaceChildren();
+    if (files.length === 0) {
+      box.appendChild(el('div', 'muted small', 'No attachments on this row any more.'));
+      if (state.attachRows) { state.attachRows.delete(row.id); requestRender(); }
+      return;
+    }
+    files.forEach(function (f) {
+      var b = el('button', 'attachlist-item', '');
+      b.type = 'button';
+      b.title = 'Open ' + displayFileName(f.name);
+      b.appendChild(el('span', 'attachlist-name', displayFileName(f.name)));
+      b.appendChild(el('span', 'muted small', fmtSize(f.metadata && f.metadata.size)));
+      b.addEventListener('click', function () { openAttachment(row.id, f.name); });
+      box.appendChild(b);
+    });
+    box.appendChild(el('div', 'muted small attachlist-hint',
+      'To add, rename or delete files, open the row with the ✎ pencil.'));
+  }
+
+  function closeAttachList() {
+    $('attachlist-backdrop').classList.add('hidden');
   }
 
   // From a search result to the same row in the full sheet: clear the
@@ -341,28 +381,47 @@
              state.sheetRows.length < state.sheetTotal && guard++ < 40) {
         await loadSheetRows(false);
       }
+      SHEET_PAGE = normalPage;
+
+      // The rows arrive in the DOM over many animation frames (chunked
+      // render), so wait until the whole sheet is really there before
+      // measuring anything.
+      var vi = -1;
+      for (var t = 0; t < 100; t++) {
+        vi = (state.renderedRows || []).findIndex(function (r) { return r.id === targetId; });
+        if (vi >= 0 && $('sheet-body').children.length >= (state.renderedRows || []).length &&
+            $('sheet-body').children[vi]) break;
+        await new Promise(function (res) { window.setTimeout(res, 100); });
+      }
+      if (vi < 0 || !$('sheet-body').children[vi]) {
+        toast('That row is no longer in this sheet.', 'warn', 5000);
+        return;
+      }
+      // Let the page-load scroll adjustments (newest-at-bottom anchoring)
+      // finish first, then place the row dead centre — deterministically,
+      // so nothing shifts it afterwards.
+      await new Promise(function (res) { window.setTimeout(res, 250); });
+      var tr = $('sheet-body').children[vi];
+      var wrap = document.querySelector('#sheet-view .table-wrap');
+      if (tr && wrap) {
+        wrap.scrollTop = Math.max(0, tr.offsetTop - (wrap.clientHeight - tr.offsetHeight) / 2);
+        wrap.scrollLeft = 0;
+      }
+      cellSel = { a: { r: vi, c: 0 }, b: { r: vi, c: 0 } };
+      applyCellSelection();
+      state.flashRowId = targetId;
+      var row = state.sheetRows.find(function (r) { return r.id === targetId; });
+      if (row) updateRowDom(row);
+      window.setTimeout(function () {
+        if (state.flashRowId !== targetId) return;
+        state.flashRowId = null;
+        var cur = state.sheetRows.find(function (r) { return r.id === targetId; });
+        if (cur) updateRowDom(cur);
+      }, 2500);
     } finally {
       SHEET_PAGE = normalPage;
       jumpBusy = false;
     }
-    var vi = (state.renderedRows || []).findIndex(function (r) { return r.id === targetId; });
-    if (vi < 0) {
-      toast('That row is no longer in this sheet.', 'warn', 5000);
-      return;
-    }
-    var tr = $('sheet-body').children[vi];
-    if (tr && tr.scrollIntoView) tr.scrollIntoView({ block: 'center' });
-    cellSel = { a: { r: vi, c: 0 }, b: { r: vi, c: 0 } };
-    applyCellSelection();
-    state.flashRowId = targetId;
-    var row = state.sheetRows.find(function (r) { return r.id === targetId; });
-    if (row) updateRowDom(row);
-    window.setTimeout(function () {
-      if (state.flashRowId !== targetId) return;
-      state.flashRowId = null;
-      var cur = state.sheetRows.find(function (r) { return r.id === targetId; });
-      if (cur) updateRowDom(cur);
-    }, 2500);
   }
 
   var sheetSearchTimer = null;
@@ -2292,8 +2351,9 @@
     gutter.appendChild(openBtn);
     gutter.appendChild(el('span', null, String(index + 1)));
     if (state.attachRows && state.attachRows.has(row.id)) {
-      var clip = el('span', 'row-clip', '📎');
-      clip.title = 'This row has attachments — open it with the pencil to see them';
+      var clip = el('button', 'row-attach-btn', '📎');
+      clip.type = 'button';
+      clip.title = 'This row has attachments — click to see and open them';
       gutter.appendChild(clip);
     }
     gutter.title = 'Drag to move this row · right-click to insert rows';
@@ -4294,6 +4354,7 @@
         if (closeSearchColsPanel()) return;        // then the search scope
         if (closeAllPanels()) return;              // then an open dropdown
         if (linkModal) { closeLinkModal(); return; }
+        if (!$('attachlist-backdrop').classList.contains('hidden')) { closeAttachList(); return; }
         if (!$('multirow-backdrop').classList.contains('hidden')) { closeMultiRowModal(); return; }
         if (catModal.open) { closeCatModal(); return; }
         if (adminModal.open) { closeAdminModal(); return; }
@@ -4331,6 +4392,10 @@
     $('au-gen').addEventListener('click', function (e) {
       e.preventDefault();
       $('au-pass').value = genPassword();
+    });
+    $('btn-attachlist-close').addEventListener('click', closeAttachList);
+    $('attachlist-backdrop').addEventListener('mousedown', function (e) {
+      if (e.target === e.currentTarget) closeAttachList();
     });
     $('btn-attach').addEventListener('click', function () { $('attach-input').click(); });
     $('attach-input').addEventListener('change', function () {
@@ -4446,6 +4511,7 @@
       var el2 = document.activeElement;
       if (el2 && (el2.tagName === 'INPUT' || el2.tagName === 'TEXTAREA' || el2.tagName === 'SELECT')) return;
       if (rowModal || state.modal || linkModal || tabModal.open || catModal.open || adminModal.open) return;
+      if (!$('attachlist-backdrop').classList.contains('hidden')) return;
       if (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
         if (e.ctrlKey || e.metaKey || e.altKey) return;   // browser shortcuts stay theirs
         e.preventDefault();                               // …and the pane must not scroll
@@ -4510,6 +4576,10 @@
       if (ev.target.closest && ev.target.closest('a')) return;   // links just open
       var info = gridInfo(ev.target);
       if (!info) return;
+      if (ev.target.closest && ev.target.closest('.row-attach-btn')) {
+        openAttachList(info.row);
+        return;
+      }
       if (ev.target.closest && ev.target.closest('.row-open-btn')) {
         openRowModal('edit', info.row);
         return;
@@ -4574,6 +4644,7 @@
       var a = document.activeElement;
       if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.tagName === 'SELECT')) return;
       if (rowModal || state.modal || linkModal || tabModal.open || catModal.open || adminModal.open) return;
+      if (!$('attachlist-backdrop').classList.contains('hidden')) return;
       var tab = currentTab();
       if (!tab || tab.kind !== 'sheet') return;
       e.preventDefault();

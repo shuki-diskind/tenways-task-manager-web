@@ -899,16 +899,49 @@ body.col-resizing { cursor: col-resize; user-select: none; }
 }
 th.sheet-gutter { z-index: 3; }
 
-/* 📎 marker for rows that carry attachments (gutter is sticky = positioned) */
-.row-clip {
+/* 📎 button on rows that carry attachments (gutter is sticky = positioned) */
+.row-attach-btn {
   position: absolute;
-  right: 1px;
-  top: 0;
-  font-size: 9px;
-  line-height: 1.2;
-  opacity: .8;
-  pointer-events: none;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  border: none;
+  background: transparent;
+  padding: 1px 2px;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: .85;
 }
+.row-attach-btn:hover {
+  opacity: 1;
+  transform: translateY(-50%) scale(1.25);
+}
+#attachlist-items {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 12px 0 4px;
+  max-height: 55vh;
+  overflow-y: auto;
+}
+.attachlist-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13.5px;
+  cursor: pointer;
+}
+.attachlist-item:hover { border-color: var(--muted); }
+.attachlist-name { flex: 1; overflow-wrap: anywhere; }
+.attachlist-hint { margin-top: 6px; }
 
 /* arrow-key navigation: keep the focused cell clear of the sticky
    header and the frozen row-number gutter when it scrolls into view */

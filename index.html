@@ -6,16 +6,16 @@
         content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src https: wss:; base-uri 'none'; form-action 'none'" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#4f46e5" />
-  <link rel="manifest" href="manifest.webmanifest?v=1.11.20" />
+  <link rel="manifest" href="manifest.webmanifest?v=1.11.21" />
   <link rel="icon" href="icons/icon-192.png" />
   <link rel="apple-touch-icon" href="icons/icon-180.png" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="TENWAYS Tasks" />
-  <meta name="app-version" content="1.11.20" />
+  <meta name="app-version" content="1.11.21" />
   <title>TENWAYS Task Manager</title>
-  <link rel="stylesheet" href="styles.css?v=1.11.20" />
+  <link rel="stylesheet" href="styles.css?v=1.11.21" />
 </head>
 <body>
 
@@ -421,6 +421,19 @@
   </div>
 
   <!-- Cell link editor (right-click a text cell, or the row editor's link fields) -->
+  <!-- The 📎 button on a sheet row: list + open its attachments -->
+  <div id="attachlist-backdrop" class="modal-backdrop hidden">
+    <div class="card modal modal-sm" role="dialog" aria-modal="true" aria-labelledby="attachlist-title">
+      <h2 id="attachlist-title">&#128206; Attachments</h2>
+      <div id="attachlist-sub" class="muted small"></div>
+      <div id="attachlist-items"></div>
+      <div class="modal-buttons">
+        <span class="spacer"></span>
+        <button type="button" class="btn ghost" id="btn-attachlist-close">Close</button>
+      </div>
+    </div>
+  </div>
+
   <div id="link-backdrop" class="modal-backdrop hidden">
     <div class="card modal modal-sm" role="dialog" aria-modal="true" aria-labelledby="link-title">
       <h2 id="link-title">Cell link</h2>
@@ -471,10 +484,10 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="vendor/supabase.js?v=1.11.20"></script>
-  <script src="config.js?v=1.11.20"></script>
-  <script src="js/client.js?v=1.11.20"></script>
-  <script src="js/app.js?v=1.11.20"></script>
-  <script src="js/auth.js?v=1.11.20"></script>
+  <script src="vendor/supabase.js?v=1.11.21"></script>
+  <script src="config.js?v=1.11.21"></script>
+  <script src="js/client.js?v=1.11.21"></script>
+  <script src="js/app.js?v=1.11.21"></script>
+  <script src="js/auth.js?v=1.11.21"></script>
 </body>
 </html>
