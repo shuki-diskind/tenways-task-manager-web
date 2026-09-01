@@ -114,6 +114,7 @@
     renderedRows: [],   // the rows renderSheet last displayed, in order
     restorePending: false, // restore the saved scroll spot after next render
     fullSheet: false,   // desktop: every row of the sheet is in memory
+    viewPinned: false,  // reader jumped/paged deep: background reloads must not move them
     renderToken: 0,     // cancels a chunked render superseded by a newer one
     channel: null,
     modal: null,        // { mode, id, version, current, sel: {assigned,visible,cats} }
@@ -399,11 +400,11 @@
   // and pick "Go to this row", the data is usually already here — and the
   // jump becomes a local render instead of a multi-second download.
   var fullPrefetch = null;   // { tabId, promise, rows, total }
-  function prefetchFullSheet() {
+  function prefetchFullSheet(force) {
     var tab = currentTab();
     if (!tab || tab.kind !== 'sheet') return;
-    if (state.fullSheet) return;
-    if (fullPrefetch && fullPrefetch.tabId === tab.id) return;   // running or done
+    if (!force && state.fullSheet) return;
+    if (!force && fullPrefetch && fullPrefetch.tabId === tab.id) return;   // running or done
     var tabId = tab.id;
     var rec = { tabId: tabId, rows: null, total: 0 };
     rec.promise = (async function () {
@@ -431,6 +432,38 @@
       return true;
     })();
     fullPrefetch = rec;
+  }
+
+  // Refreshes the sheet's data WITHOUT losing the reader's place: while
+  // the view is pinned (or fully loaded) it re-downloads every page in
+  // parallel and puts the scroll back; otherwise a plain first-page load.
+  async function softReloadSheet() {
+    var wrap = document.querySelector('#sheet-view .table-wrap');
+    var y = wrap ? wrap.scrollTop : 0;
+    var x = wrap ? wrap.scrollLeft : 0;
+    if (state.viewPinned || state.fullSheet) {
+      prefetchFullSheet(true);
+      var tab = currentTab();
+      var ok = (fullPrefetch && tab && fullPrefetch.tabId === tab.id)
+        ? await fullPrefetch.promise : false;
+      if (ok && fullPrefetch.rows) {
+        state.loadSeq = (state.loadSeq || 0) + 1;
+        state.sheetRows = fullPrefetch.rows;
+        state.sheetTotal = fullPrefetch.total;
+        state.fullSheet = state.sheetRows.length >= state.sheetTotal;
+        renderSheet();
+        for (var t = 0; t < 100 && wrap; t++) {   // wait till it's tall enough again
+          if (wrap.scrollHeight >= y + wrap.clientHeight) {
+            wrap.scrollTop = y;
+            wrap.scrollLeft = x;
+            break;
+          }
+          await new Promise(function (res) { window.setTimeout(res, 50); });
+        }
+        return;
+      }
+    }
+    await loadSheetRows(true);
   }
 
   var jumpBusy = false;
@@ -486,6 +519,7 @@
       }
       cellSel = { a: { r: vi, c: 0 }, b: { r: vi, c: 0 } };
       applyCellSelection();
+      state.viewPinned = true;   // stay on this row until ⟳ Refresh
       state.flashRowId = targetId;
       var row = state.sheetRows.find(function (r) { return r.id === targetId; });
       if (row) updateRowDom(row);
@@ -540,7 +574,13 @@
       ensureCurrentTab();
 
       var tab = currentTab();
-      if (tab && tab.kind === 'sheet') {
+      if (tab && tab.kind === 'sheet' && state.viewPinned && state.sheetCols.length) {
+        // The reader jumped to a row or paged deep into the sheet: leave
+        // the grid EXACTLY where it is. Realtime keeps individual rows
+        // fresh; the sheet's ⟳ Refresh button unpins and reloads.
+        state.todos = [];
+        state.categories = [];
+      } else if (tab && tab.kind === 'sheet') {
         state.sheetCols = await fetchSheetColumns(tab.id);
         state.colWidths = loadColWidths();
         state.hiddenCols = loadHiddenCols();
@@ -1955,6 +1995,7 @@
     saveScrollState();               // remember the spot on the tab we leave
     state.restorePending = true;     // and restore the one we arrive at
     state.currentTabId = id;
+    state.viewPinned = false;
     try { window.localStorage.setItem('tenways.tab', id); } catch (e) { /* private mode */ }
     $('search-box').value = '';
     $('sheet-search').value = '';
@@ -3339,7 +3380,7 @@
     if (label) recordAction(label, hist);
     if (blocked > 0) {
       toast(blocked + ' row(s) were just changed by someone else — reloading.', 'warn', 5000);
-      await loadSheetRows(true);
+      await softReloadSheet();
       return false;
     }
     return true;
@@ -3515,7 +3556,7 @@
         if (!ok) {
           toast('Could not ' + dir + ' — the sheet was changed elsewhere, so the history was cleared.', 'warn', 5500);
           clearHistory();
-          await loadSheetRows(true);
+          await softReloadSheet();
           return;
         }
       }
@@ -3829,7 +3870,7 @@
     }
     if (!upd.data || upd.data.length === 0) {
       toast('This row was just changed by someone else — reloading.', 'warn', 5000);
-      await loadSheetRows(true);
+      await softReloadSheet();
       return;
     }
     var i = state.sheetRows.findIndex(function (r) { return r.id === cur.id; });
@@ -3982,7 +4023,7 @@
     }
     if (!upd.data || upd.data.length === 0) {
       toast('This row was just changed by someone else — reloading.', 'warn', 5000);
-      await loadSheetRows(true);
+      await softReloadSheet();
       return;
     }
     var i = state.sheetRows.findIndex(function (r) { return r.id === cur.id; });
@@ -4116,7 +4157,7 @@
     if (upd.error) { toast('Could not save the link: ' + upd.error.message, 'error', 6000); return; }
     if (!upd.data || upd.data.length === 0) {
       toast('This row was just changed by someone else — reloading.', 'warn', 5000);
-      await loadSheetRows(true);
+      await softReloadSheet();
       return;
     }
     var i = state.sheetRows.findIndex(function (r) { return r.id === rowId; });
@@ -4423,7 +4464,11 @@
 
   if (sb) {
     $('btn-new').addEventListener('click', function () { openModal('create', null); });
-    $('btn-refresh').addEventListener('click', function () { reload(true); });
+    $('btn-refresh').addEventListener('click', function () {
+      state.viewPinned = false;   // a deliberate refresh always reloads
+      fullPrefetch = null;
+      reload(true);
+    });
     $('record-form').addEventListener('submit', onModalSave);
     $('btn-cancel').addEventListener('click', closeModal);
     $('modal-backdrop').addEventListener('mousedown', function (e) {
@@ -4714,6 +4759,23 @@
       if (w) w.scrollTop = w.scrollHeight;
       else window.scrollTo(0, document.body.scrollHeight);
     });
+    $('btn-sheet-refresh').addEventListener('click', async function () {
+      state.viewPinned = false;
+      fullPrefetch = null;
+      $('sheet-search').value = '';
+      state.sheetQuery = '';
+      state.hits = [];
+      state.hitIndex = 0;
+      clearCellSelection();
+      await loadSheetRows(true);   // back to the newest page
+      var w = sheetScroller();
+      if (w) {
+        window.setTimeout(function () {
+          w.scrollTop = state.sortDir === 'asc' ? w.scrollHeight : 0;
+        }, 150);
+      }
+      toast('Showing the newest rows again', 'ok', 2200);
+    });
     window.addEventListener('scroll', scheduleScrollSave);
     window.addEventListener('beforeunload', saveScrollState);
     $('btn-colvis').addEventListener('click', toggleColVisPanel);
@@ -4746,7 +4808,10 @@
       if (e.target === e.currentTarget) closeRowModal();
     });
     $('sheet-search').addEventListener('input', onSheetSearch);
-    $('btn-sheet-more').addEventListener('click', function () { loadSheetRows(false); });
+    $('btn-sheet-more').addEventListener('click', function () {
+      state.viewPinned = true;   // they are digging in — don't yank the view
+      loadSheetRows(false);
+    });
 
     $('search-box').addEventListener('input', render);
     $('filter-status').addEventListener('change', render);
