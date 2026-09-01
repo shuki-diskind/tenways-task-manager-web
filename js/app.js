@@ -345,16 +345,46 @@
       return;
     }
     files.forEach(function (f) {
+      var line = el('div', 'attachlist-line', '');
       var b = el('button', 'attachlist-item', '');
       b.type = 'button';
       b.title = 'Open ' + displayFileName(f.name);
       b.appendChild(el('span', 'attachlist-name', displayFileName(f.name)));
       b.appendChild(el('span', 'muted small', fmtSize(f.metadata && f.metadata.size)));
       b.addEventListener('click', function () { openAttachment(row.id, f.name); });
-      box.appendChild(b);
+      line.appendChild(b);
+      var dl = el('button', 'btn ghost btn-small attachlist-dl', '⬇');
+      dl.type = 'button';
+      dl.title = 'Download ' + displayFileName(f.name);
+      dl.addEventListener('click', function () { downloadAttachment(row.id, f.name, dl); });
+      line.appendChild(dl);
+      box.appendChild(line);
     });
     box.appendChild(el('div', 'muted small attachlist-hint',
-      'To add, rename or delete files, open the row with the ✎ pencil.'));
+      'Click a file to open it · ⬇ downloads it · add, rename or delete files with the ✎ pencil.'));
+  }
+
+  // A signed URL with a download disposition: the browser saves the file
+  // instead of showing it.
+  async function downloadAttachment(id, name, btn) {
+    if (btn) btn.disabled = true;
+    var res = await sb.storage.from('attachments')
+      .createSignedUrl(id + '/' + name, 300, { download: displayFileName(name) });
+    if (btn) btn.disabled = false;
+    if (res.error) {
+      toast('Could not download: ' + res.error.message, 'error', 6000);
+      return;
+    }
+    if (IS_ELECTRON) {
+      window.open(res.data.signedUrl);   // the OS browser saves it
+      return;
+    }
+    var a = document.createElement('a');
+    a.href = res.data.signedUrl;
+    a.download = displayFileName(name);
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
   }
 
   function closeAttachList() {
@@ -364,43 +394,90 @@
   // From a search result to the same row in the full sheet: clear the
   // search, page the sheet in (bigger pages, newest-first as always)
   // until the row is loaded, then scroll to it, select it and flash it.
+  // The moment someone SEARCHES a sheet, quietly start pulling the whole
+  // sheet in parallel 1000-row pages. By the time they read the results
+  // and pick "Go to this row", the data is usually already here — and the
+  // jump becomes a local render instead of a multi-second download.
+  var fullPrefetch = null;   // { tabId, promise, rows, total }
+  function prefetchFullSheet() {
+    var tab = currentTab();
+    if (!tab || tab.kind !== 'sheet') return;
+    if (state.fullSheet) return;
+    if (fullPrefetch && fullPrefetch.tabId === tab.id) return;   // running or done
+    var tabId = tab.id;
+    var rec = { tabId: tabId, rows: null, total: 0 };
+    rec.promise = (async function () {
+      var ct = await sb.rpc('count_sheet_rows', { p_tab: tabId, p_q: '', p_cols: null });
+      if (ct.error) return false;
+      var total = Number(ct.data);
+      if (total > 20000) return false;   // beyond this, stick to paging
+      var reqs = [];
+      var pages = Math.max(1, Math.ceil(total / 1000));
+      for (var p = 0; p < pages; p++) {
+        reqs.push(sb.rpc('search_sheet_rows',
+          { p_tab: tabId, p_q: '', p_limit: 1000, p_offset: p * 1000, p_cols: null }));
+      }
+      var rs = await Promise.all(reqs);
+      for (var e = 0; e < rs.length; e++) { if (rs[e].error) return false; }
+      var seen = {};
+      var merged = [];
+      rs.forEach(function (r) {
+        (r.data || []).forEach(function (row) {
+          if (!seen[row.id]) { seen[row.id] = 1; merged.push(row); }
+        });
+      });
+      rec.rows = merged;
+      rec.total = total;
+      return true;
+    })();
+    fullPrefetch = rec;
+  }
+
   var jumpBusy = false;
   async function jumpToRow(target) {
     if (jumpBusy) return;
     jumpBusy = true;
     var targetId = target.id;
-    toast('Taking you to that row…', 'ok', 2500);
-    var normalPage = SHEET_PAGE;
-    SHEET_PAGE = 1000;   // the RPC's cap — fewest round-trips
     try {
+      var tab = currentTab();
+      if (!tab) return;
       $('sheet-search').value = '';
       state.hitIndex = 0;
-      await loadSheetRows(true);
-      var guard = 0;
-      while (!state.sheetRows.some(function (r) { return r.id === targetId; }) &&
-             state.sheetRows.length < state.sheetTotal && guard++ < 40) {
-        await loadSheetRows(false);
-      }
-      SHEET_PAGE = normalPage;
 
-      // The rows arrive in the DOM over many animation frames (chunked
-      // render), so wait until the whole sheet is really there before
-      // measuring anything.
+      // Whole sheet already in memory? Then this is purely local.
+      if (!state.fullSheet) {
+        toast('Taking you to that row…', 'ok', 2500);
+        prefetchFullSheet();   // usually already done by the search
+        var ok = (fullPrefetch && fullPrefetch.tabId === tab.id)
+          ? await fullPrefetch.promise : false;
+        if (!ok || !fullPrefetch.rows) {
+          toast('Could not load the sheet — try again.', 'error', 6000);
+          return;
+        }
+        state.loadSeq = (state.loadSeq || 0) + 1;   // outdate in-flight search loads
+        state.sheetRows = fullPrefetch.rows;
+        state.sheetTotal = fullPrefetch.total;
+        state.fullSheet = state.sheetRows.length >= state.sheetTotal;
+      }
+      state.sheetQuery = '';
+      state.hits = [];
+      renderSheet();
+
+      // The rows reach the DOM over several animation frames (chunked
+      // render), appended strictly top-down — so the moment the target's
+      // <tr> exists its offsetTop is final, and we can place it while the
+      // rest of the sheet still streams in below.
       var vi = -1;
-      for (var t = 0; t < 100; t++) {
+      for (var t = 0; t < 600; t++) {
         vi = (state.renderedRows || []).findIndex(function (r) { return r.id === targetId; });
-        if (vi >= 0 && $('sheet-body').children.length >= (state.renderedRows || []).length &&
-            $('sheet-body').children[vi]) break;
-        await new Promise(function (res) { window.setTimeout(res, 100); });
+        if (vi >= 0 && $('sheet-body').children[vi]) break;
+        await new Promise(function (res) { window.setTimeout(res, 40); });
       }
       if (vi < 0 || !$('sheet-body').children[vi]) {
         toast('That row is no longer in this sheet.', 'warn', 5000);
         return;
       }
-      // Let the page-load scroll adjustments (newest-at-bottom anchoring)
-      // finish first, then place the row dead centre — deterministically,
-      // so nothing shifts it afterwards.
-      await new Promise(function (res) { window.setTimeout(res, 250); });
+      await new Promise(function (res) { window.setTimeout(res, 60); });
       var tr = $('sheet-body').children[vi];
       var wrap = document.querySelector('#sheet-view .table-wrap');
       if (tr && wrap) {
@@ -419,7 +496,6 @@
         if (cur) updateRowDom(cur);
       }, 2500);
     } finally {
-      SHEET_PAGE = normalPage;
       jumpBusy = false;
     }
   }
@@ -433,6 +509,7 @@
       renderSheet();
       return;
     }
+    if ($('sheet-search').value.trim() !== '') prefetchFullSheet();
     sheetSearchTimer = setTimeout(function () { loadSheetRows(true); }, 350);
   }
 
@@ -471,6 +548,7 @@
         state.hits = [];
         state.hitIndex = 0;
         clearHistory();
+        fullPrefetch = null;   // sheet data may have changed — refetch on demand
         $('btn-searchcols').textContent = 'All columns';
         state.sortDir = loadSortDir();
         $('sheet-sortdir').value = state.sortDir;
@@ -2507,8 +2585,12 @@
         }
       }
       body.appendChild(frag);
-      if (i < rows.length) window.requestAnimationFrame(chunk);
-      else {
+      if (i < rows.length) {
+        // rAF never fires while the window is hidden/minimised — keep
+        // appending on a timer there so the sheet finishes rendering.
+        if (document.hidden) window.setTimeout(chunk, 60);
+        else window.requestAnimationFrame(chunk);
+      } else {
         applyCellSelection();
         updateSearchBar();
       }

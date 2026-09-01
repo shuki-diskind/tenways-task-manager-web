@@ -941,6 +941,9 @@ th.sheet-gutter { z-index: 3; }
 }
 .attachlist-item:hover { border-color: var(--muted); }
 .attachlist-name { flex: 1; overflow-wrap: anywhere; }
+.attachlist-line { display: flex; align-items: stretch; gap: 6px; }
+.attachlist-line .attachlist-item { flex: 1; }
+.attachlist-dl { flex: none; padding: 0 10px; font-size: 15px; }
 .attachlist-hint { margin-top: 6px; }
 
 /* arrow-key navigation: keep the focused cell clear of the sticky
