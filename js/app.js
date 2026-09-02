@@ -3994,6 +3994,7 @@
         if (col.kind === 'textarea' && e.shiftKey) return;  // Shift+Enter = new line
         e.preventDefault();
         commit();
+        moveCellSelection('ArrowDown', false);   // Excel: Enter steps down
       } else if (e.key === 'Escape') {
         e.stopPropagation();
         cancel();
@@ -4643,6 +4644,11 @@
         if (e.ctrlKey || e.metaKey || e.altKey) return;   // browser shortcuts stay theirs
         e.preventDefault();                               // …and the pane must not scroll
         moveCellSelection(e.key, e.shiftKey);
+        return;
+      }
+      if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        moveCellSelection(e.shiftKey ? 'ArrowUp' : 'ArrowDown', false);  // Excel: Enter steps down
         return;
       }
       if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'd' || e.key === 'D')) {
