@@ -115,6 +115,8 @@
     restorePending: false, // restore the saved scroll spot after next render
     fullSheet: false,   // desktop: every row of the sheet is in memory
     viewPinned: false,  // reader jumped/paged deep: background reloads must not move them
+    loadedSheetTab: null, // which sheet tab's rows are in memory
+    lastRenderTab: null,  // which tab renderSheet last painted (scroll-keep scope)
     renderToken: 0,     // cancels a chunked render superseded by a newer one
     channel: null,
     modal: null,        // { mode, id, version, current, sel: {assigned,visible,cats} }
@@ -466,6 +468,69 @@
     await loadSheetRows(true);
   }
 
+  // After a realtime reconnect, changes made while offline were missed.
+  // Bring the loaded rows up to date WITHOUT touching the reader's view:
+  // changed rows repaint individually; only added/removed rows trigger a
+  // re-render (which now preserves the scroll anyway).
+  var catchUpBusy = false;
+  async function silentSheetCatchUp() {
+    if (catchUpBusy) return;
+    var tab = currentTab();
+    if (!tab || tab.kind !== 'sheet' || state.loadedSheetTab !== tab.id) return;
+    catchUpBusy = true;
+    try {
+      var q = state.fullSheet ? '' : (state.sheetQuery || '');
+      var want = Math.max(state.sheetRows.length, SHEET_PAGE);
+      var pages = Math.min(20, Math.max(1, Math.ceil(want / 1000)));
+      var reqs = [];
+      for (var p = 0; p < pages; p++) {
+        reqs.push(sb.rpc('search_sheet_rows',
+          { p_tab: tab.id, p_q: q, p_limit: 1000, p_offset: p * 1000, p_cols: searchColsParam() }));
+      }
+      reqs.push(sb.rpc('count_sheet_rows', { p_tab: tab.id, p_q: q, p_cols: searchColsParam() }));
+      var rs = await Promise.all(reqs);
+      var ct = rs.pop();
+      for (var e2 = 0; e2 < rs.length; e2++) { if (rs[e2].error) return; }
+      var now = currentTab();
+      if (!now || now.id !== tab.id) return;   // moved on meanwhile
+      var seen = {};
+      var fresh = [];
+      rs.forEach(function (r) {
+        (r.data || []).forEach(function (row) {
+          if (!seen[row.id]) { seen[row.id] = 1; fresh.push(row); }
+        });
+      });
+      if (!ct.error) state.sheetTotal = Number(ct.data);
+      var localById = {};
+      state.sheetRows.forEach(function (r) { localById[r.id] = r; });
+      var structural = fresh.some(function (fr) { return !localById[fr.id]; }) ||
+        state.sheetRows.some(function (r) { return !seen[r.id]; });
+      if (structural) {
+        state.loadSeq = (state.loadSeq || 0) + 1;
+        state.sheetRows = fresh;
+        state.fullSheet = q === '' && state.sheetRows.length >= state.sheetTotal;
+        requestRender();
+        return;
+      }
+      var moved = false;
+      fresh.forEach(function (fr) {
+        var loc = localById[fr.id];
+        if (!loc || Number(fr.version) <= (Number(loc.version) || 0)) return;
+        var i = state.sheetRows.findIndex(function (r) { return r.id === fr.id; });
+        if (i < 0) return;
+        if (Number(fr.position) !== Number(loc.position)) moved = true;
+        state.sheetRows[i] = fr;
+        if (!moved) updateRowDom(fr);
+      });
+      if (moved) {
+        sortLoadedRows();
+        requestRender();
+      }
+    } finally {
+      catchUpBusy = false;
+    }
+  }
+
   var jumpBusy = false;
   async function jumpToRow(target) {
     if (jumpBusy) return;
@@ -574,13 +639,17 @@
       ensureCurrentTab();
 
       var tab = currentTab();
-      if (tab && tab.kind === 'sheet' && state.viewPinned && state.sheetCols.length) {
-        // The reader jumped to a row or paged deep into the sheet: leave
-        // the grid EXACTLY where it is. Realtime keeps individual rows
-        // fresh; the sheet's ⟳ Refresh button unpins and reloads.
+      if (tab && tab.kind === 'sheet' && state.sheetCols.length &&
+          state.loadedSheetTab === tab.id && (!showErrors || state.viewPinned)) {
+        // EVERY background reload (realtime events, reconnect catch-ups)
+        // leaves the grid exactly where it is — realtime keeps individual
+        // rows fresh and reconnects run a silent row catch-up instead.
+        // Only a deliberate refresh (header ⟳, or the sheet's ⟳ button)
+        // rebuilds the view.
         state.todos = [];
         state.categories = [];
       } else if (tab && tab.kind === 'sheet') {
+        state.loadedSheetTab = tab.id;
         state.sheetCols = await fetchSheetColumns(tab.id);
         state.colWidths = loadColWidths();
         state.hiddenCols = loadHiddenCols();
@@ -1908,7 +1977,10 @@
       .subscribe(function (status) {
         console.log('[app] realtime status: ' + status);
         setLive(status === 'SUBSCRIBED');
-        if (status === 'SUBSCRIBED') scheduleReload(); // catch anything missed while connecting
+        if (status === 'SUBSCRIBED') {
+          scheduleReload();        // refresh tabs/people lists (never the grid)
+          silentSheetCatchUp();    // and quietly true-up the loaded sheet rows
+        }
         if ((status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') && state.user) {
           clearTimeout(state.retryTimer);
           state.retryTimer = setTimeout(function () {
@@ -2611,6 +2683,25 @@
     head.replaceChildren(hr);
 
     // Thousands of rows are appended in chunks so the app never freezes.
+    // Rebuilding empties the container for a few frames, which would clamp
+    // the reader's scroll to the top — remember it and put it back as the
+    // rows grow tall enough. A different tab's first render starts at 0.
+    var keepWrap = isPhone() ? null : document.querySelector('#sheet-view .table-wrap');
+    var sameTab = state.lastRenderTab === state.currentTabId;
+    state.lastRenderTab = state.currentTabId;
+    var keepY = (keepWrap && sameTab) ? keepWrap.scrollTop : 0;
+    var keepX = (keepWrap && sameTab) ? keepWrap.scrollLeft : 0;
+    var scrollKept = false;
+    function keepScroll() {
+      // Re-assert until the position sticks (the container clamps while
+      // short), then stop — so anything that scrolls on purpose after the
+      // render (jump, refresh, the reopen-position restore) wins.
+      if (!keepWrap || scrollKept) return;
+      keepWrap.scrollLeft = keepX;
+      keepWrap.scrollTop = keepY;
+      if (Math.abs(keepWrap.scrollTop - keepY) <= 1) scrollKept = true;
+    }
+
     var token = ++state.renderToken;
     body.replaceChildren();
     var i = 0;
@@ -2626,6 +2717,7 @@
         }
       }
       body.appendChild(frag);
+      keepScroll();   // browsers clamp while short; retried every chunk
       if (i < rows.length) {
         // rAF never fires while the window is hidden/minimised — keep
         // appending on a timer there so the sheet finishes rendering.
@@ -2634,6 +2726,7 @@
       } else {
         applyCellSelection();
         updateSearchBar();
+        keepScroll();
       }
     })();
 
@@ -3096,6 +3189,26 @@
     c = Math.max(0, Math.min(cols.length - 1, c));
     var np = { r: r, c: c };
     cellSel = extend ? { a: cellSel.a, b: np } : { a: np, b: np };
+    applyCellSelection();
+    var tr = $('sheet-body').children[r];
+    var td = tr && tr.children[c + 1];
+    if (td && td.scrollIntoView) td.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+
+  // Tab walks one cell right (Shift+Tab left), wrapping to the next /
+  // previous row at the edges — exactly like Excel.
+  function stepCellTab(back) {
+    if (!cellSel) return;
+    var rows = state.renderedRows || [];
+    var cols = visibleSheetCols();
+    if (!rows.length || !cols.length) return;
+    var r = cellSel.b.r;
+    var c = cellSel.b.c + (back ? -1 : 1);
+    if (c >= cols.length) { c = 0; r++; }
+    if (c < 0) { c = cols.length - 1; r--; }
+    if (r < 0 || r >= rows.length) return;   // nowhere further to go
+    var np = { r: r, c: c };
+    cellSel = { a: np, b: np };
     applyCellSelection();
     var tr = $('sheet-body').children[r];
     var td = tr && tr.children[c + 1];
@@ -3995,6 +4108,10 @@
         e.preventDefault();
         commit();
         moveCellSelection('ArrowDown', false);   // Excel: Enter steps down
+      } else if (e.key === 'Tab') {
+        e.preventDefault();
+        commit();
+        stepCellTab(e.shiftKey);                 // Excel: Tab steps right
       } else if (e.key === 'Escape') {
         e.stopPropagation();
         cancel();
@@ -4649,6 +4766,11 @@
       if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey && !e.altKey) {
         e.preventDefault();
         moveCellSelection(e.shiftKey ? 'ArrowUp' : 'ArrowDown', false);  // Excel: Enter steps down
+        return;
+      }
+      if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();   // the browser must not cycle focus
+        stepCellTab(e.shiftKey);
         return;
       }
       if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'd' || e.key === 'D')) {
