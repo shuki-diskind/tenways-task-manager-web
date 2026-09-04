@@ -116,6 +116,9 @@
     fullSheet: false,   // desktop: every row of the sheet is in memory
     viewPinned: false,  // reader jumped/paged deep: background reloads must not move them
     loadedSheetTab: null, // which sheet tab's rows are in memory
+    notifs: [],         // the reader's latest notifications (newest first)
+    notifUnread: 0,     // unread count for the bell badge
+    notifSettings: {},  // admin modal: userId -> {email_task_assigned, app_task_assigned}
     lastRenderTab: null,  // which tab renderSheet last painted (scroll-keep scope)
     renderToken: 0,     // cancels a chunked render superseded by a newer one
     channel: null,
@@ -310,6 +313,136 @@
         wrapEl.scrollTop += (wrapEl.scrollHeight - preH);
       }, 120);
     }
+  }
+
+  // ---------- notifications (bell in the header) ----------
+  // Rows are written by a database trigger when a task is assigned; unread
+  // ones wait in the table, so whatever was missed while the app was
+  // closed appears at the next sign-in.
+
+  function renderNotifBadge() {
+    var b = $('notif-badge');
+    var n = state.notifUnread || 0;
+    b.textContent = n > 99 ? '99+' : String(n);
+    b.classList.toggle('hidden', n === 0);
+  }
+
+  function notifTime(iso) {
+    var d = new Date(iso);
+    var mins = Math.round((Date.now() - d.getTime()) / 60000);
+    if (mins < 1) return 'just now';
+    if (mins < 60) return mins + ' min ago';
+    if (mins < 60 * 24) return Math.round(mins / 60) + ' h ago';
+    return d.toLocaleDateString();
+  }
+
+  function renderNotifList() {
+    var list = $('notif-list');
+    list.replaceChildren();
+    if (!state.notifs.length) {
+      list.appendChild(el('div', 'notif-empty', 'Nothing here yet — you will see it when a task is assigned to you.'));
+      return;
+    }
+    state.notifs.forEach(function (n) {
+      var p = n.payload || {};
+      var item = el('div', 'notif-item' + (n.read_at ? '' : ' unread'), '');
+      var meta = el('div', 'notif-meta', '');
+      meta.appendChild(el('span', 'small', 'Task assigned by ' + (p.by || 'a teammate')));
+      meta.appendChild(el('span', 'spacer'));
+      meta.appendChild(el('span', 'muted small', notifTime(n.created_at)));
+      item.appendChild(meta);
+      item.appendChild(el('div', 'notif-title', p.title || '(no title)'));
+      var bodyText = [];
+      if (p.description) bodyText.push(p.description);
+      if (p.notes) bodyText.push('Notes: ' + p.notes);
+      if (bodyText.length) item.appendChild(el('div', 'notif-body', bodyText.join('\n')));
+      var row = el('div', 'notif-meta', '');
+      var open = el('button', 'btn ghost btn-small', '\u{1F4C2} Open the task');
+      open.type = 'button';
+      open.addEventListener('click', function () { openNotification(n); });
+      row.appendChild(open);
+      if (!n.read_at) {
+        var mark = el('button', 'btn ghost btn-small', 'Mark read');
+        mark.type = 'button';
+        mark.addEventListener('click', function () { markNotifRead(n); });
+        row.appendChild(mark);
+      }
+      item.appendChild(row);
+      list.appendChild(item);
+    });
+  }
+
+  async function loadNotifications() {
+    var res = await sb.from('notifications').select('*')
+      .order('created_at', { ascending: false }).limit(30);
+    if (res.error) return;
+    state.notifs = res.data || [];
+    var c = await sb.from('notifications').select('id', { count: 'exact', head: true })
+      .is('read_at', null);
+    state.notifUnread = c.error ? state.notifs.filter(function (n) { return !n.read_at; }).length
+      : Number(c.count || 0);
+    renderNotifBadge();
+    renderNotifList();
+  }
+
+  async function markNotifRead(n) {
+    if (n.read_at) return;
+    n.read_at = new Date().toISOString();
+    state.notifUnread = Math.max(0, (state.notifUnread || 0) - 1);
+    renderNotifBadge();
+    renderNotifList();
+    await sb.from('notifications').update({ read_at: n.read_at }).eq('id', n.id);
+  }
+
+  async function markAllNotifsRead() {
+    var now = new Date().toISOString();
+    state.notifs.forEach(function (n) { if (!n.read_at) n.read_at = now; });
+    state.notifUnread = 0;
+    renderNotifBadge();
+    renderNotifList();
+    await sb.from('notifications').update({ read_at: now }).is('read_at', null);
+  }
+
+  function toggleNotifPanel() {
+    var p = $('notif-panel');
+    var opening = p.classList.contains('hidden');
+    p.classList.toggle('hidden');
+    if (opening) renderNotifList();
+  }
+
+  function closeNotifPanel() {
+    var p = $('notif-panel');
+    if (p.classList.contains('hidden')) return false;
+    p.classList.add('hidden');
+    return true;
+  }
+
+  async function openNotification(n) {
+    markNotifRead(n);
+    closeNotifPanel();
+    await openTodoById(n.todo_id, (n.payload || {}).tab_id);
+  }
+
+  async function openTodoById(todoId, tabId) {
+    if (!todoId) { toast('This task no longer exists.', 'warn', 4000); return; }
+    if (tabId && state.currentTabId !== tabId &&
+        state.tabs.some(function (t) { return t.id === tabId; })) {
+      switchTab(tabId);
+      await new Promise(function (res) { window.setTimeout(res, 900); });
+    }
+    var t = await fetchOne(todoId);
+    if (!t) { toast('This task no longer exists (or is not visible to you).', 'warn', 5000); return; }
+    openModal('edit', t);
+  }
+
+  function applyNotificationInsert(rec) {
+    state.notifs.unshift(rec);
+    if (state.notifs.length > 30) state.notifs.pop();
+    state.notifUnread = (state.notifUnread || 0) + 1;
+    renderNotifBadge();
+    renderNotifList();
+    var p = rec.payload || {};
+    toast('\u{1F514} ' + (p.by || 'A teammate') + ' assigned you: ' + (p.title || 'a task'), 'ok', 6000);
   }
 
   // Storage folders are named by row/record id, so one cheap root listing
@@ -1550,6 +1683,12 @@
     adminModal.open = true;
     adminModal.pwEditId = null;
     adminModal.nameEditId = null;
+    adminModal.notifEditId = null;
+    state.notifSettings = {};
+    sb.from('notification_settings').select('*').then(function (res) {
+      (res.data || []).forEach(function (s) { state.notifSettings[s.user_id] = s; });
+      if (adminModal.open) renderAdminUsers();
+    });
     $('au-first').value = '';
     $('au-last').value = '';
     $('au-email').value = '';
@@ -1610,6 +1749,16 @@
       renderAdminUsers();
     });
     head.appendChild(pwBtn);
+    var notifBtn = el('button', 'btn ghost btn-small', '\u{1F514} Alerts');
+    notifBtn.type = 'button';
+    notifBtn.title = 'Choose which notifications this user gets';
+    notifBtn.addEventListener('click', function () {
+      adminModal.notifEditId = adminModal.notifEditId === p.id ? null : p.id;
+      adminModal.pwEditId = null;
+      adminModal.nameEditId = null;
+      renderAdminUsers();
+    });
+    head.appendChild(notifBtn);
     if (p.id !== state.user.id) {
       var delBtn = el('button', 'btn ghost btn-small danger-text', 'Delete…');
       delBtn.type = 'button';
@@ -1618,6 +1767,44 @@
       head.appendChild(delBtn);
     }
     card.appendChild(head);
+
+    if (adminModal.notifEditId === p.id) {
+      var cur = state.notifSettings[p.id] || {};
+      var nfRow = el('div', 'pw-row notif-prefs', '');
+      var box = el('div', null, '');
+      box.appendChild(el('div', 'small', 'When a task is assigned to them, notify by:'));
+      function prefTick(labelText, val) {
+        var lab = document.createElement('label');
+        lab.className = 'small';
+        lab.style.display = 'flex';
+        lab.style.gap = '7px';
+        lab.style.alignItems = 'center';
+        lab.style.margin = '6px 0 0';
+        var cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.style.width = 'auto';
+        cb.checked = val !== false;   // no saved row = ticked (the default)
+        lab.appendChild(cb);
+        lab.appendChild(document.createTextNode(labelText));
+        box.appendChild(lab);
+        return cb;
+      }
+      var cbEmail = prefTick('✉ Email (to ' + p.email + ')', cur.email_task_assigned);
+      var cbApp = prefTick('\u{1F514} In the app (bell, on this computer and the web app)', cur.app_task_assigned);
+      nfRow.appendChild(box);
+      var nfSave = el('button', 'btn primary btn-small', 'Save alerts');
+      nfSave.type = 'button';
+      nfSave.addEventListener('click', function () { saveNotifSettings(p, cbEmail, cbApp, nfSave); });
+      var nfCancel = el('button', 'btn ghost btn-small', 'Cancel');
+      nfCancel.type = 'button';
+      nfCancel.addEventListener('click', function () {
+        adminModal.notifEditId = null;
+        renderAdminUsers();
+      });
+      nfRow.appendChild(nfSave);
+      nfRow.appendChild(nfCancel);
+      card.appendChild(nfRow);
+    }
 
     if (adminModal.nameEditId === p.id) {
       var nrow = el('div', 'pw-row');
@@ -1761,6 +1948,26 @@
       toast('Could not set password: ' + err.message, 'error', 7000);
       btn.disabled = false;
     }
+  }
+
+  async function saveNotifSettings(p, cbEmail, cbApp, btn) {
+    btn.disabled = true;
+    var row = {
+      user_id: p.id,
+      email_task_assigned: !!cbEmail.checked,
+      app_task_assigned: !!cbApp.checked,
+      updated_at: new Date().toISOString(),
+    };
+    var res = await sb.from('notification_settings').upsert(row, { onConflict: 'user_id' });
+    if (res.error) {
+      toast('Could not save the alert settings: ' + res.error.message, 'error', 6000);
+      btn.disabled = false;
+      return;
+    }
+    state.notifSettings[p.id] = row;
+    adminModal.notifEditId = null;
+    renderAdminUsers();
+    toast('Alert settings saved for ' + p.display_name, 'ok', 3500);
   }
 
   async function deleteUser(p, btn) {
@@ -1974,6 +2181,11 @@
         console.log('[app] realtime permissions: ' + payload.eventType);
         scheduleReload();
       })
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'notifications',
+        filter: 'user_id=eq.' + state.user.id }, function (payload) {
+        console.log('[app] realtime notification');
+        if (payload.new) applyNotificationInsert(payload.new);
+      })
       .subscribe(function (status) {
         console.log('[app] realtime status: ' + status);
         setLive(status === 'SUBSCRIBED');
@@ -2009,6 +2221,13 @@
     state.restorePending = true;     // reopen where the app was closed
     await reload(true);
     connectRealtime();
+    loadNotifications();             // incl. whatever arrived while away
+    // Email links open the web app at #todo=<id> — take the reader there.
+    var hm = /^#todo=([0-9a-fA-F-]{36})$/.exec(window.location.hash || '');
+    if (hm) {
+      try { window.history.replaceState(null, '', window.location.pathname + window.location.search); } catch (e) { /* file:// */ }
+      openTodoById(hm[1], null);
+    }
     clearInterval(state.clockTimer);
     state.clockTimer = setInterval(function () {
       if (state.user && !document.hidden) render(); // keep "5 min ago" fresh
@@ -2018,6 +2237,10 @@
   function stop() {
     state.user = null;
     state.myProfile = null;
+    state.notifs = [];
+    state.notifUnread = 0;
+    renderNotifBadge();
+    closeNotifPanel();
     disconnectRealtime();
     clearTimeout(state.reloadTimer);
     clearTimeout(state.retryTimer);
@@ -4595,6 +4818,7 @@
     document.addEventListener('keydown', function (e) {
       if (e.key === 'Escape') {
         if (closeCellMenu()) return;               // Escape closes the cell menu first
+        if (closeNotifPanel()) return;
         if (closeColVisPanel()) return;            // then the columns filter
         if (closeSearchColsPanel()) return;        // then the search scope
         if (closeAllPanels()) return;              // then an open dropdown
@@ -4619,6 +4843,7 @@
       // the Columns filter panel shares the dropdown styling; without this
       // guard any press inside it closed it before the tick registered
       if (!e.target.closest || !e.target.closest('.msel, .colvis')) closeAllPanels();
+      if (!e.target.closest || !e.target.closest('.notif')) closeNotifPanel();
     });
     Object.keys(MSELS).forEach(function (key) {
       $('msel-btn-' + key).addEventListener('click', function () { toggleMselPanel(key); });
@@ -4628,6 +4853,8 @@
       var c = state.modal && state.modal.current;
       if (c) openModal('edit', c); // re-fills the form and clears the banner
     });
+    $('btn-notif').addEventListener('click', toggleNotifPanel);
+    $('btn-notif-readall').addEventListener('click', markAllNotifsRead);
     $('btn-admin').addEventListener('click', openAdminModal);
     $('btn-admin-close').addEventListener('click', closeAdminModal);
     $('admin-backdrop').addEventListener('mousedown', function (e) {
