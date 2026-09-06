@@ -12,7 +12,7 @@
   // The explicit FK names disambiguate the two joins to profiles.
   var TODO_SELECT = [
     'id', 'title', 'description', 'notes', 'status', 'priority', 'due_date',
-    'assigned_to', 'visible_to', 'category_ids',
+    'created_date', 'assigned_to', 'visible_to', 'category_ids',
     'version', 'created_at', 'updated_at', 'created_by', 'updated_by',
     'editor:profiles!todos_updated_by_fkey(display_name,email)',
     'creator:profiles!todos_created_by_fkey(display_name,email)',
@@ -119,6 +119,7 @@
     notifs: [],         // the reader's latest notifications (newest first)
     notifUnread: 0,     // unread count for the bell badge
     notifSettings: {},  // admin modal: userId -> {email_task_assigned, app_task_assigned}
+    taskHiddenCols: new Set(), // hidden task-table columns (per user, per tab)
     lastRenderTab: null,  // which tab renderSheet last painted (scroll-keep scope)
     renderToken: 0,     // cancels a chunked render superseded by a newer one
     channel: null,
@@ -218,6 +219,7 @@
   function fetchTodos(tabId) {
     return sb.from('todos').select(TODO_SELECT)
       .eq('tab_id', tabId)
+      .order('created_date', { ascending: false, nullsFirst: false })
       .order('created_at', { ascending: false })
       .then(function (res) {
         if (res.error) throw res.error;
@@ -807,6 +809,8 @@
         state.categories = t[1];
         state.sheetCols = [];
         state.sheetRows = [];
+        state.taskHiddenCols = loadTaskHiddenCols();
+        applyTaskColVis();
       }
       renderTabStrip();
       updateAdminUi();
@@ -975,8 +979,20 @@
       asgIds.length === 0 ? 'Unassigned' : (asgNames.join(', ') || '—')));
     tr.appendChild(tdAsg);
 
+    var tdVis = el('td', 'col-visible');
+    var visIds = t.visible_to || [];
+    var visNames = visIds.map(profileName).filter(Boolean);
+    tdVis.appendChild(el('div', 'assigned-names' + (visIds.length === 0 ? ' muted' : ''),
+      visIds.length === 0 ? 'Everyone' : (visNames.join(', ') || '—')));
+    if (visIds.length > 0) {
+      tdVis.title = 'Visible to: ' + visNames.join(', ') +
+        '\n(plus assignees, the creator, and admins)';
+    }
+    tr.appendChild(tdVis);
+
     var tdCr = el('td', 'col-created');
-    tdCr.appendChild(el('div', 'created-when', formatDue(String(t.created_at).slice(0, 10))));
+    tdCr.appendChild(el('div', 'created-when',
+      formatDue(t.created_date || String(t.created_at).slice(0, 10))));
     tdCr.appendChild(el('div', 'created-who muted small', personName(t.creator)));
     tdCr.title = 'Created by ' + personName(t.creator) + ' on ' + fullTime(t.created_at);
     tr.appendChild(tdCr);
@@ -1200,11 +1216,26 @@
       // Nobody ticked = unassigned. The panel shows a "No one" row that is
       // on by default; ticking a person replaces it.
       everyoneRow: 'No one (unassigned)',
+      // Assigning someone guarantees they see the record: while the
+      // visibility list is restricted, they are added to it (and locked).
+      afterToggle: function (id, nowChecked) {
+        var vis = mselSet('visible');
+        if (nowChecked && vis.size > 0) vis.add(id);
+        updateMselSummary('visible');
+      },
     },
     visible: {
       items: function () { return state.profiles.map(function (p) { return { id: p.id, label: p.display_name }; }); },
       summary: function (set) { return summarizePeople(set, 'Everyone'); },
       empty: 'No team members found.',
+      everyoneRow: 'Everyone',
+      locked: function () { return mselSet('assigned'); },
+      lockedHint: 'Assigned to this task, so they always see it',
+      // Restricting visibility always keeps every assignee on the list.
+      afterToggle: function () {
+        var vis = mselSet('visible');
+        if (vis.size > 0) mselSet('assigned').forEach(function (a) { vis.add(a); });
+      },
     },
     cats: {
       // Non-admins can only tag records with categories they hold
@@ -1264,14 +1295,22 @@
       erow.appendChild(el('span', null, cfg.everyoneRow));
       panel.appendChild(erow);
     }
+    var locked = cfg.locked ? cfg.locked() : null;
     items.forEach(function (item) {
       var row = el('label', 'msel-row');
       var cb = document.createElement('input');
       cb.type = 'checkbox';
-      cb.checked = selected.has(item.id);
+      var isLocked = !!(locked && locked.has(item.id));
+      cb.checked = selected.has(item.id) || isLocked;
+      if (isLocked) {
+        cb.disabled = true;
+        row.classList.add('msel-locked');
+        row.title = cfg.lockedHint || '';
+      }
       cb.addEventListener('change', function () {
         if (cb.checked) selected.add(item.id); else selected.delete(item.id);
-        if (cfg.everyoneRow) buildMselPanel(key); // keep the Everyone row in sync
+        if (cfg.afterToggle) cfg.afterToggle(item.id, cb.checked);
+        if (cfg.everyoneRow || cfg.locked) buildMselPanel(key); // keep the panel in sync
         updateMselSummary(key);
       });
       row.appendChild(cb);
@@ -1392,6 +1431,11 @@
         cats: new Set(t ? (t.category_ids || []) : []),
       },
     };
+    // An assigned person always sees the record: a restricted visibility
+    // list includes every assignee from the moment the card opens.
+    if (state.modal.sel.visible.size > 0) {
+      state.modal.sel.assigned.forEach(function (a) { state.modal.sel.visible.add(a); });
+    }
     $('modal-title').textContent = mode === 'create' ? 'New record' : 'Edit record';
     $('rec-title').value = t ? t.title : '';
     $('rec-description').value = t ? (t.description || '') : '';
@@ -1399,6 +1443,11 @@
     $('rec-status').value = t ? t.status : 'open';
     $('rec-priority').value = t ? t.priority : 'normal';
     $('rec-due').value = (t && t.due_date) ? t.due_date : '';
+    // Created: free-choice date, offered as "today" on new records and as the
+    // stored date when editing (falling back to the real creation timestamp).
+    $('rec-created').value = t
+      ? (t.created_date || String(t.created_at).slice(0, 10))
+      : todayStr();
     closeAllPanels();
     ['assigned', 'visible', 'cats'].forEach(updateMselSummary);
     setModalError(null);
@@ -2055,6 +2104,11 @@
 
     var title = $('rec-title').value.trim();
     if (!title) { setModalError('Title is required.'); return; }
+    // Belt and braces for the picker rule: a restricted visibility list
+    // always contains every assignee.
+    if (m.sel.visible.size > 0) {
+      m.sel.assigned.forEach(function (a) { m.sel.visible.add(a); });
+    }
     var fields = {
       title: title,
       description: $('rec-description').value,
@@ -2062,6 +2116,7 @@
       status: $('rec-status').value,
       priority: $('rec-priority').value,
       due_date: $('rec-due').value || null,
+      created_date: $('rec-created').value || todayStr(),
       assigned_to: Array.from(m.sel.assigned),
       visible_to: Array.from(m.sel.visible),
       category_ids: Array.from(m.sel.cats),
@@ -3048,6 +3103,87 @@
   function updateColVisButton() {
     var hidden = state.sheetCols.filter(function (c) { return state.hiddenCols.has(c.key); }).length;
     $('btn-colvis').textContent = hidden ? 'Columns · ' + hidden + ' hidden' : 'Columns';
+  }
+
+  // ---------- task-table column filter (per user, per tab) ----------
+  // Which columns of a task list are on display. Hidden keys are stored
+  // (not visible ones), so any column added later starts visible.
+  var TASKCOLS = [
+    { key: 'notes', label: 'Description' },
+    { key: 'status', label: 'Status' },
+    { key: 'priority', label: 'Priority' },
+    { key: 'due', label: 'Due' },
+    { key: 'assigned', label: 'Assigned to' },
+    { key: 'visible', label: 'Visible to' },
+    { key: 'created', label: 'Created' },
+    { key: 'edited', label: 'Last edited' },
+  ];
+
+  function taskColsKey() { return 'tenways.taskcols.' + state.currentTabId; }
+
+  function loadTaskHiddenCols() {
+    try {
+      var raw = window.localStorage.getItem(taskColsKey());
+      return new Set(raw ? JSON.parse(raw) : []);
+    } catch (e) { return new Set(); }
+  }
+
+  function saveTaskHiddenCols() {
+    try {
+      window.localStorage.setItem(taskColsKey(), JSON.stringify(Array.from(state.taskHiddenCols)));
+    } catch (e) { /* private mode */ }
+  }
+
+  function applyTaskColVis() {
+    var table = $('todo-table');
+    TASKCOLS.forEach(function (c) {
+      table.classList.toggle('hide-' + c.key, state.taskHiddenCols.has(c.key));
+    });
+    var btn = $('btn-taskcols');
+    btn.textContent = state.taskHiddenCols.size === 0
+      ? 'Columns' : 'Columns (' + state.taskHiddenCols.size + ' hidden)';
+  }
+
+  function buildTaskColsPanel() {
+    var p = $('taskcols-panel');
+    p.replaceChildren();
+    function onTick() {
+      saveTaskHiddenCols();
+      buildTaskColsPanel();
+      applyTaskColVis();
+    }
+    var all = el('label', 'msel-row msel-everyone');
+    var allCb = document.createElement('input');
+    allCb.type = 'checkbox';
+    allCb.checked = state.taskHiddenCols.size === 0;
+    allCb.addEventListener('change', function () {
+      state.taskHiddenCols.clear();
+      onTick();
+    });
+    all.appendChild(allCb);
+    all.appendChild(el('span', null, 'Show all columns'));
+    p.appendChild(all);
+    TASKCOLS.forEach(function (c) {
+      var row = el('label', 'msel-row');
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = !state.taskHiddenCols.has(c.key);
+      cb.addEventListener('change', function () {
+        if (cb.checked) state.taskHiddenCols.delete(c.key); else state.taskHiddenCols.add(c.key);
+        onTick();
+      });
+      row.appendChild(cb);
+      row.appendChild(el('span', null, c.label));
+      p.appendChild(row);
+    });
+  }
+
+  function toggleTaskColsPanel() {
+    var p = $('taskcols-panel');
+    if (!p.classList.contains('hidden')) { p.classList.add('hidden'); return; }
+    closeAllPanels();
+    buildTaskColsPanel();
+    p.classList.remove('hidden');
   }
 
   function closeColVisPanel() {
@@ -5134,6 +5270,7 @@
     window.addEventListener('scroll', scheduleScrollSave);
     window.addEventListener('beforeunload', saveScrollState);
     $('btn-colvis').addEventListener('click', toggleColVisPanel);
+    $('btn-taskcols').addEventListener('click', toggleTaskColsPanel);
     $('btn-undo').addEventListener('click', function () { doUndoRedo('undo'); });
     $('btn-redo').addEventListener('click', function () { doUndoRedo('redo'); });
     document.addEventListener('keydown', function (e) {

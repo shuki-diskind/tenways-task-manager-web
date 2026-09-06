@@ -418,6 +418,9 @@ tbody tr:hover td { background: var(--row-hover); }
 }
 .msel-row:hover { background: var(--row-hover); }
 .msel-row input { width: auto; margin: 0; accent-color: var(--accent); }
+/* Assignees inside the "Visible to" picker: always ticked, never removable */
+.msel-row.msel-locked { opacity: 0.75; cursor: default; }
+.msel-row.msel-locked input { cursor: default; }
 .msel-everyone { border-bottom: 1px solid var(--line); border-radius: 6px 6px 0 0; font-weight: 600; }
 .msel-empty { padding: 8px 10px; color: var(--muted); font-size: 12.5px; max-width: 240px; white-space: normal; }
 
@@ -616,6 +619,9 @@ tbody tr:hover td { background: var(--row-hover); }
   .col-assigned { flex: 1 1 100%; }
   .col-assigned .assigned-names { max-width: none; }
   .col-assigned .assigned-names::before { content: "Assigned: "; color: var(--muted); }
+  .col-visible { flex: 1 1 100%; }
+  .col-visible .assigned-names { max-width: none; }
+  .col-visible .assigned-names::before { content: "Visible to: "; color: var(--muted); }
   .col-created { flex: 1 1 100%; display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
   .col-created .created-when::before { content: "Created "; color: var(--muted); }
   .col-created .created-who::before { content: "by "; }
@@ -998,6 +1004,16 @@ th.sheet-gutter { z-index: 3; }
   margin: 4px 0 6px;
 }
 .notif-empty { color: var(--muted); text-align: center; padding: 18px 0 12px; }
+
+/* ---------- task-table column filter ---------- */
+#todo-table.hide-notes    .col-notes    { display: none !important; }
+#todo-table.hide-status   .col-status   { display: none !important; }
+#todo-table.hide-priority .col-priority { display: none !important; }
+#todo-table.hide-due      .col-due      { display: none !important; }
+#todo-table.hide-assigned .col-assigned { display: none !important; }
+#todo-table.hide-visible  .col-visible  { display: none !important; }
+#todo-table.hide-created  .col-created  { display: none !important; }
+#todo-table.hide-edited   .col-edited   { display: none !important; }
 
 /* arrow-key navigation: keep the focused cell clear of the sticky
    header and the frozen row-number gutter when it scrolls into view */
