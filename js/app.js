@@ -920,12 +920,6 @@
 
     var tdTitle = el('td', 'col-title');
     var titleLine = el('div', 'title-text', t.title);
-    if ((t.visible_to || []).length > 0) {
-      var lock = el('span', 'lock', '🔒');
-      lock.title = 'Only visible to: ' + t.visible_to.map(profileName).join(', ') +
-        '\n(plus assignees, the creator, and admins)';
-      titleLine.appendChild(lock);
-    }
     tdTitle.appendChild(titleLine);
     var catNames = (t.category_ids || []).map(categoryName).filter(Boolean);
     if (catNames.length) {
@@ -982,12 +976,12 @@
     var tdVis = el('td', 'col-visible');
     var visIds = t.visible_to || [];
     var visNames = visIds.map(profileName).filter(Boolean);
-    tdVis.appendChild(el('div', 'assigned-names' + (visIds.length === 0 ? ' muted' : ''),
-      visIds.length === 0 ? 'Everyone' : (visNames.join(', ') || '—')));
-    if (visIds.length > 0) {
-      tdVis.title = 'Visible to: ' + visNames.join(', ') +
-        '\n(plus assignees, the creator, and admins)';
-    }
+    var visLabel = visIds.length > 0 ? (visNames.join(', ') || '—')
+      : (asgIds.length > 0 ? 'Assignees only' : 'Admins only');
+    tdVis.appendChild(el('div', 'assigned-names' + (visIds.length === 0 ? ' muted' : ''), visLabel));
+    tdVis.title = visIds.length > 0
+      ? 'Also visible to: ' + visNames.join(', ') + '\n(plus the assignees and admins)'
+      : 'Visible to the assigned people and admins only';
     tr.appendChild(tdVis);
 
     var tdCr = el('td', 'col-created');
@@ -1216,26 +1210,21 @@
       // Nobody ticked = unassigned. The panel shows a "No one" row that is
       // on by default; ticking a person replaces it.
       everyoneRow: 'No one (unassigned)',
-      // Assigning someone guarantees they see the record: while the
-      // visibility list is restricted, they are added to it (and locked).
-      afterToggle: function (id, nowChecked) {
-        var vis = mselSet('visible');
-        if (nowChecked && vis.size > 0) vis.add(id);
-        updateMselSummary('visible');
-      },
+      // Assignment decides visibility, so the Visible-to summary and its
+      // locked rows must follow every tick here.
+      afterToggle: function () { updateMselSummary('visible'); },
     },
     visible: {
       items: function () { return state.profiles.map(function (p) { return { id: p.id, label: p.display_name }; }); },
-      summary: function (set) { return summarizePeople(set, 'Everyone'); },
+      // The list holds EXTRA viewers only. Assignees and admins always
+      // see the task; nobody ticked and nobody assigned = admins only.
+      summary: function (set) {
+        if (set.size > 0) return summarizePeople(set, '');
+        return mselSet('assigned').size > 0 ? 'Assignees only' : 'Admins only';
+      },
       empty: 'No team members found.',
-      everyoneRow: 'Everyone',
       locked: function () { return mselSet('assigned'); },
       lockedHint: 'Assigned to this task, so they always see it',
-      // Restricting visibility always keeps every assignee on the list.
-      afterToggle: function () {
-        var vis = mselSet('visible');
-        if (vis.size > 0) mselSet('assigned').forEach(function (a) { vis.add(a); });
-      },
     },
     cats: {
       // Non-admins can only tag records with categories they hold
@@ -1431,11 +1420,6 @@
         cats: new Set(t ? (t.category_ids || []) : []),
       },
     };
-    // An assigned person always sees the record: a restricted visibility
-    // list includes every assignee from the moment the card opens.
-    if (state.modal.sel.visible.size > 0) {
-      state.modal.sel.assigned.forEach(function (a) { state.modal.sel.visible.add(a); });
-    }
     $('modal-title').textContent = mode === 'create' ? 'New record' : 'Edit record';
     $('rec-title').value = t ? t.title : '';
     $('rec-description').value = t ? (t.description || '') : '';
@@ -2104,11 +2088,14 @@
 
     var title = $('rec-title').value.trim();
     if (!title) { setModalError('Title is required.'); return; }
-    // Belt and braces for the picker rule: a restricted visibility list
-    // always contains every assignee.
-    if (m.sel.visible.size > 0) {
-      m.sel.assigned.forEach(function (a) { m.sel.visible.add(a); });
-    }
+    // Visibility follows assignment: warn a non-admin who is about to
+    // save a task that they themselves will no longer be able to see.
+    var selfHidden = !isAdmin() &&
+      !m.sel.assigned.has(state.user.id) && !m.sel.visible.has(state.user.id);
+    if (selfHidden && !window.confirm(
+      'You are not assigned to this task and not on its "Visible to" list, ' +
+      'so after saving it will disappear from your view — only its assignees ' +
+      'and admins will see it.\n\nSave anyway?')) return;
     var fields = {
       title: title,
       description: $('rec-description').value,
@@ -2128,11 +2115,56 @@
     try {
       if (m.mode === 'create') {
         fields.tab_id = state.currentTabId;
+        if (selfHidden) {
+          // Postgres refuses RETURNING a row its author cannot select, so
+          // insert without asking for the record back.
+          var insMin = await sb.from('todos').insert(fields);
+          if (insMin.error) throw insMin.error;
+          closeModal();
+          toast('Record added — only its assignees and admins can see it, so it does not appear in your list.', 'ok', 7000);
+          return;
+        }
         var ins = await sb.from('todos').insert(fields).select(TODO_SELECT).single();
         if (ins.error) throw ins.error;
         upsertLocal(ins.data);
         closeModal();
         toast('Record added', 'ok');
+      } else if (selfHidden) {
+        // PostgREST updates always RETURN the row, which Postgres refuses
+        // when the saver can no longer see it — this RPC saves server-side
+        // with the same permission and version checks.
+        var updMin = await sb.rpc('update_todo_full', {
+          p_id: m.id,
+          p_version: m.version,
+          p_title: fields.title,
+          p_description: fields.description,
+          p_notes: fields.notes,
+          p_status: fields.status,
+          p_priority: fields.priority,
+          p_due_date: fields.due_date,
+          p_created_date: fields.created_date,
+          p_assigned_to: fields.assigned_to,
+          p_visible_to: fields.visible_to,
+          p_category_ids: fields.category_ids,
+        });
+        if (updMin.error) throw updMin.error;
+        if (Number(updMin.data) > 0) {
+          removeLocal(m.id);
+          closeModal();
+          toast('Saved — this task is no longer visible to you.', 'ok', 6000);
+          return;
+        }
+        var cur = await fetchOne(m.id);
+        if (!cur) {
+          removeLocal(m.id);
+          m.mode = 'create'; m.id = null; m.version = null; m.current = null;
+          $('modal-title').textContent = 'New record';
+          updateModalMeta(null);
+          showDeletedNotice();
+        } else {
+          upsertLocal(cur);
+          showConflict(cur);
+        }
       } else {
         var res = await saveWithVersionCheck(m.id, m.version, fields);
         if (res.ok) {
