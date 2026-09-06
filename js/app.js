@@ -635,6 +635,15 @@
           if (!seen[row.id]) { seen[row.id] = 1; fresh.push(row); }
         });
       });
+      // The pages come in 1000s but the reader may only have 200 rows on
+      // screen — comparing (or adopting) more than that would silently
+      // grow the view to 1000 rows on every reconnect.
+      if (fresh.length > want) {
+        fresh = fresh.slice(0, want);
+        var kept = {};
+        fresh.forEach(function (row) { kept[row.id] = 1; });
+        seen = kept;
+      }
       if (!ct.error) state.sheetTotal = Number(ct.data);
       var localById = {};
       state.sheetRows.forEach(function (r) { localById[r.id] = r; });
@@ -4396,7 +4405,14 @@
     var payload;
     if (t.kind === 'sheet') {
       var w = document.querySelector('#sheet-view .table-wrap');
-      payload = { rows: state.sheetRows.length, y: w ? w.scrollTop : 0, x: w ? w.scrollLeft : 0 };
+      // After a jump the whole sheet is in memory; remembering that state
+      // would make the next launch re-download thousands of rows. Deep
+      // views reopen at the newest page instead.
+      if (state.sheetRows.length > 3 * SHEET_PAGE) {
+        payload = { rows: SHEET_PAGE, y: 0, x: 0 };
+      } else {
+        payload = { rows: state.sheetRows.length, y: w ? w.scrollTop : 0, x: w ? w.scrollLeft : 0 };
+      }
     } else {
       payload = { y: window.scrollY || 0 };
     }
@@ -4415,15 +4431,32 @@
     var s = loadScrollState(t.id);
     if (!s) return;
     if (t.kind === 'sheet') {
+      var saved = Number(s.rows) || 0;
+      // A remembered state deeper than a few pages comes from an old
+      // version's jump — start at the fresh newest page instead of
+      // re-downloading the sheet page by page.
+      if (saved > 3 * SHEET_PAGE) return;
       var guard = 0;
-      var want = Math.min(Number(s.rows) || 0, state.sheetTotal);
-      while (state.sheetQuery === '' && state.sheetRows.length < want && guard++ < 60) {
+      var want = Math.min(saved, state.sheetTotal);
+      while (state.sheetQuery === '' && state.sheetRows.length < want && guard++ < 5) {
         await loadSheetRows(false);
       }
-      window.setTimeout(function () {
-        var w = document.querySelector('#sheet-view .table-wrap');
-        if (w) { w.scrollTop = s.y || 0; w.scrollLeft = s.x || 0; }
-      }, 400);
+      // Place the view only once the chunked render is tall enough —
+      // setting it early just clamps the scroll back to the top.
+      var w = document.querySelector('#sheet-view .table-wrap');
+      for (var i = 0; i < 50 && w; i++) {
+        if (w.scrollHeight >= (s.y || 0) + w.clientHeight || i === 49) {
+          w.scrollTop = s.y || 0;
+          w.scrollLeft = s.x || 0;
+          // once more after the page-load anchor timers have all fired
+          window.setTimeout(function () {
+            w.scrollTop = s.y || 0;
+            w.scrollLeft = s.x || 0;
+          }, 300);
+          break;
+        }
+        await new Promise(function (res) { window.setTimeout(res, 60); });
+      }
     } else {
       window.setTimeout(function () { window.scrollTo(0, s.y || 0); }, 120);
     }
