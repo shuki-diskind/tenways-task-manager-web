@@ -1005,6 +1005,20 @@ th.sheet-gutter { z-index: 3; }
 }
 .notif-empty { color: var(--muted); text-align: center; padding: 18px 0 12px; }
 
+/* Phones: the bell is near the left edge, so the right-anchored dropdown
+   would open off-screen — span the viewport instead (toggleNotifPanel
+   sets top/max-height to sit just under the bell). */
+@media (max-width: 720px) {
+  .notif-panel {
+    position: fixed;
+    left: 10px;
+    right: 10px;
+    top: 110px;
+    width: auto;
+    max-height: calc(100vh - 130px);
+  }
+}
+
 /* ---------- task-table column filter ---------- */
 #todo-table.hide-notes    .col-notes    { display: none !important; }
 #todo-table.hide-status   .col-status   { display: none !important; }

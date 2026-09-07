@@ -408,6 +408,17 @@
   function toggleNotifPanel() {
     var p = $('notif-panel');
     var opening = p.classList.contains('hidden');
+    // On a phone the bell sits near the LEFT edge, so the right-anchored
+    // dropdown would hang off-screen — pin it to the viewport instead,
+    // just under the bell (the phone CSS makes it position: fixed).
+    if (opening && window.matchMedia('(max-width: 720px)').matches) {
+      var r = $('btn-notif').getBoundingClientRect();
+      p.style.top = Math.round(r.bottom + 6) + 'px';
+      p.style.maxHeight = Math.max(200, window.innerHeight - r.bottom - 20) + 'px';
+    } else {
+      p.style.top = '';
+      p.style.maxHeight = '';
+    }
     p.classList.toggle('hidden');
     if (opening) renderNotifList();
   }
