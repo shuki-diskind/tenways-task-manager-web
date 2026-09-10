@@ -1,11 +1,11 @@
 // Minimal service worker: network-first with cache fallback for the app
 // shell only. Supabase API/auth/realtime/attachment requests are left
 // completely alone (their URLs are outside this worker's scope path).
-var CACHE = 'tenways-tasks-1.11.32';
+var CACHE = 'tenways-tasks-1.11.33';
 var BASE = self.registration.scope; // .../webapp/ - only app files live here
 var SHELL = [
-  'index.html', 'styles.css?v=1.11.32', 'config.js?v=1.11.32', 'manifest.webmanifest?v=1.11.32',
-  'js/client.js?v=1.11.32', 'js/app.js?v=1.11.32', 'js/auth.js?v=1.11.32', 'vendor/supabase.js?v=1.11.32',
+  'index.html', 'styles.css?v=1.11.33', 'config.js?v=1.11.33', 'manifest.webmanifest?v=1.11.33',
+  'js/client.js?v=1.11.33', 'js/app.js?v=1.11.33', 'js/auth.js?v=1.11.33', 'vendor/supabase.js?v=1.11.33',
   'icons/icon-192.png', 'icons/icon-512.png',
 ];
 

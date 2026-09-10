@@ -2916,6 +2916,33 @@
   }
 
   // Schedules ONE repaint for a burst of changes (realtime floods, pastes).
+  // A cell the user is typing in must never be wiped by a background
+  // repaint: while an inline editor is open, full renders and repaints of
+  // THAT row wait; the row's data still updates underneath, so the commit
+  // saves against the fresh version. Everything deferred is flushed the
+  // moment the editor closes (Enter, Tab, Escape or blur).
+  var inlineEdit = null;          // { rowId, closing } while an editor is open
+  var pendingEditRender = false;  // a render arrived while typing
+
+  function deferWhileEditing(rowId) {
+    if (!inlineEdit || inlineEdit.closing) return false;
+    if (!document.querySelector('#sheet-body .cell-editor')) {
+      inlineEdit = null;          // editor vanished some other way — don't block
+      return false;
+    }
+    if (rowId && rowId !== inlineEdit.rowId) return false;  // other rows are safe
+    pendingEditRender = true;
+    return true;
+  }
+
+  function inlineEditClosed() {
+    inlineEdit = null;
+    if (pendingEditRender) {
+      pendingEditRender = false;
+      requestRender();
+    }
+  }
+
   function requestRender() {
     if (state.renderQueued) return;
     state.renderQueued = true;
@@ -2931,6 +2958,7 @@
 
   // Repaints a single row in place — the hot path for cell edits.
   function updateRowDom(rowLike) {
+    if (deferWhileEditing(rowLike.id)) return;
     var fresh = state.sheetRows.find(function (r) { return r.id === rowLike.id; }) || rowLike;
     var rows = state.renderedRows || [];
     var i = rows.findIndex(function (r) { return r.id === fresh.id; });
@@ -2946,6 +2974,7 @@
   }
 
   function renderSheet() {
+    if (deferWhileEditing(null)) return;   // never rebuild under an open editor
     var cols = visibleSheetCols();
     var rows = state.sortDir === 'asc' ? state.sheetRows.slice().reverse() : state.sheetRows;
     if (state.fullSheet && state.sheetQuery) {
@@ -4520,22 +4549,30 @@
     td.appendChild(input);
     input.focus();
     if (input.select) { try { input.select(); } catch (e) { /* selects nothing */ } }
+    inlineEdit = { rowId: row.id, closing: false };  // holds background repaints off
 
     var done = false;
     function commit() {
       if (done) return;
       done = true;
+      if (inlineEdit) inlineEdit.closing = true;   // our own repaints may proceed
       var val = input.value;
       var newVal = val === '' ? null
         : ((col.kind === 'number' || col.kind === 'uniquenumber') ? Number(val) : val);
       var oldVal = v == null ? '' : String(v);
-      if (String(newVal == null ? '' : newVal) === oldVal) { updateRowDom(row); return; }
-      commitInlineValue(row, col, newVal);
+      if (String(newVal == null ? '' : newVal) === oldVal) {
+        updateRowDom(row);
+        inlineEditClosed();
+        return;
+      }
+      commitInlineValue(row, col, newVal).then(inlineEditClosed, inlineEditClosed);
     }
     function cancel() {
       if (done) return;
       done = true;
+      if (inlineEdit) inlineEdit.closing = true;
       updateRowDom(row);
+      inlineEditClosed();
     }
     input.addEventListener('keydown', function (e) {
       if (e.key === 'Enter') {
@@ -4553,7 +4590,12 @@
       }
     });
     input.addEventListener('blur', function () {
-      if (!input.isConnected) { done = true; return; }
+      if (!input.isConnected) {
+        // removed from outside (a deliberate refresh) — nothing to commit
+        done = true;
+        inlineEditClosed();
+        return;
+      }
       commit();
     });
     if (col.kind === 'picklist' || col.kind === 'colorlist') input.addEventListener('change', commit);
